@@ -1,6 +1,6 @@
 package com.luokuiai.forga.core.eval;
 
-import java.time.Instant;
+import java.time.Duration;
 import java.util.Optional;
 
 /**
@@ -11,7 +11,7 @@ import java.util.Optional;
  * @param maxVisitedNodes maximum expression or relation nodes visited
  * @param maxIntermediateResults maximum relationship entries processed per lookup
  * @param maxBatchSize maximum number of checks in one batch
- * @param deadline optional evaluation deadline
+ * @param timeout optional timeout applied independently to each evaluation
  */
 public record EvaluationLimits(
     int maxDepth,
@@ -19,10 +19,10 @@ public record EvaluationLimits(
     int maxVisitedNodes,
     int maxIntermediateResults,
     int maxBatchSize,
-    Optional<Instant> deadline) {
+    Optional<Duration> timeout) {
 
   /**
-   * Creates evaluation limits without node, intermediate, batch, or deadline overrides.
+   * Creates evaluation limits without node, intermediate, batch, or timeout overrides.
    *
    * @param maxDepth maximum recursive expression depth
    * @param maxResolverCalls maximum relation lookup calls
@@ -39,7 +39,7 @@ public record EvaluationLimits(
    * @param maxVisitedNodes maximum expression or relation nodes visited
    * @param maxIntermediateResults maximum relationship entries processed per lookup
    * @param maxBatchSize maximum number of checks in one batch
-   * @param deadline optional evaluation deadline
+   * @param timeout optional timeout applied independently to each evaluation
    */
   public EvaluationLimits {
     if (maxDepth < 1) {
@@ -57,7 +57,10 @@ public record EvaluationLimits(
     if (maxBatchSize < 1) {
       throw new IllegalArgumentException("maxBatchSize must be positive");
     }
-    deadline = deadline == null ? Optional.empty() : deadline;
+    timeout = timeout == null ? Optional.empty() : timeout;
+    if (timeout.filter(Duration::isNegative).isPresent()) {
+      throw new IllegalArgumentException("timeout must not be negative");
+    }
   }
 
   /**

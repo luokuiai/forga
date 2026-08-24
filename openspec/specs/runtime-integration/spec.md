@@ -73,20 +73,26 @@ authorization path without a Forga data migration.
 When a host explicitly enables Forga, the Spring integration MUST assemble an
 `AuthorizationEvaluator` from one host-owned `CompiledPolicy`, registered relationship resolvers,
 and conservative default evaluation limits. Hosts MUST be able to replace the evaluator, lookup
-adapters, resolver registry, caveat evaluator, and limits with their own Beans.
+adapters, resolver registry, caveat evaluator, and limits with their own Beans. Check-only assembly
+MUST NOT require reverse resolver capabilities.
 
 #### Scenario: Complete host runtime is enabled
-- **WHEN** a host declares `@EnableForga`, one compiled policy, and resolvers supporting every
-  relation required by that policy
+- **WHEN** a host declares `@EnableForga`, one compiled policy, and forward resolvers supporting
+  every relation required by that policy
 - **THEN** exactly one `AuthorizationEvaluator` Bean is registered
 - **AND** authorization checks use the host policy and resolver data
+
+#### Scenario: Check-only host omits reverse capability
+- **WHEN** an enabled host provides every required forward resolver but no reverse resolver
+- **THEN** evaluator startup succeeds and `check` remains available
+- **AND** a later `listObjects` call fails closed if its reverse capability is unavailable
 
 #### Scenario: Host overrides the evaluator
 - **WHEN** an enabled host provides its own `AuthorizationEvaluator` Bean
 - **THEN** the Starter backs off and does not register another evaluator
 
-#### Scenario: Enabled runtime lacks policy or resolver capability
-- **WHEN** an enabled host omits its compiled policy or a resolver capability required by that policy
+#### Scenario: Enabled runtime lacks policy or forward resolver capability
+- **WHEN** an enabled host omits its compiled policy or a forward resolver required by that policy
 - **THEN** application startup fails before requests are served with a precise configuration error
 
 #### Scenario: Integration is not enabled
@@ -121,3 +127,19 @@ MUST continue to provide endpoint authorization mapping when endpoint permission
 - **THEN** the host provides an `EndpointPermissionAuthorizer` that may inject the assembled
   evaluator
 - **AND** the Starter does not guess an object reference from route or handler data
+
+### Requirement: Runtime APIs correspond to assembled behavior
+The Spring integration MUST expose only runtime types used by production assembly and MUST NOT
+publish standalone request-scope or component-wrapper APIs that no integration consumes.
+
+#### Scenario: Runtime beans are assembled
+- **WHEN** Forga is enabled
+- **THEN** hosts consume the typed policy, registry, lookups, limits, and evaluator beans directly
+
+### Requirement: Focused authentication provider selection
+MyBatis assembly MUST select exactly one authenticated subject provider and MUST report a focused
+Forga configuration error when provider ownership is absent or ambiguous.
+
+#### Scenario: Multiple providers exist
+- **WHEN** an enabled MyBatis integration discovers more than one authenticated subject provider
+- **THEN** startup fails with the Forga exactly-one-provider validation error

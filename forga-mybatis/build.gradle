@@ -2,4 +2,6 @@ dependencies {
   api project(':forga-core')
   api project(':forga-query')
   compileOnly "com.baomidou:mybatis-plus-extension:${mybatisPlusVersion}"
+  implementation "com.baomidou:mybatis-plus-jsqlparser:${mybatisPlusVersion}"
+  testImplementation 'com.h2database:h2:2.3.232'
 }

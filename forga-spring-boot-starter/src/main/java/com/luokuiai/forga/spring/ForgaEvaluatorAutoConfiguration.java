@@ -88,7 +88,7 @@ public class ForgaEvaluatorAutoConfiguration {
       ObjectListingLookup objectListings,
       EvaluationLimits limits,
       ObjectProvider<CaveatEvaluator> caveats) {
-    ForgaRuntimeAssembler.validateResolvers(policy, resolvers);
+    ForgaResolverValidator.validateForwardCapabilities(policy, resolvers);
     CaveatEvaluator caveatEvaluator = caveats.getIfAvailable();
     return caveatEvaluator == null
         ? new AuthorizationEvaluator(policy, relationships, objectListings, limits)

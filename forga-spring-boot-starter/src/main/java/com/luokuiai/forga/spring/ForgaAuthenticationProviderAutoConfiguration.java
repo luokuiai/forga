@@ -1,7 +1,6 @@
 package com.luokuiai.forga.spring;
 
 import com.luokuiai.forga.core.context.AuthenticatedSubjectProvider;
-import java.util.List;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -21,17 +20,6 @@ public class ForgaAuthenticationProviderAutoConfiguration {
   @Bean
   public SmartInitializingSingleton forgaAuthenticationProviderValidation(
       ObjectProvider<AuthenticatedSubjectProvider> providers) {
-    return () -> validate(providers.orderedStream().toList());
-  }
-
-  private static void validate(List<AuthenticatedSubjectProvider> providers) {
-    if (providers.isEmpty()) {
-      throw new ForgaRuntimeException("enabled integration requires an authentication provider");
-    }
-    if (providers.size() > 1) {
-      throw new ForgaRuntimeException(
-          "enabled integration requires exactly one authentication provider, found "
-              + providers.size());
-    }
+    return () -> ForgaAuthenticationProviders.requireOne(providers);
   }
 }

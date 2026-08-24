@@ -9,6 +9,14 @@ database. Host applications keep their own accounts, business resources, relatio
 permission-management UI. Forga provides the authorization model, bounded evaluator, resolver
 contracts, query constraints, and optional framework integrations.
 
+## Architecture
+
+![Forga architecture](docs/architecture/forga-architecture.svg)
+
+The host application owns identity selection, business data, relationship implementations, and
+schema mappings. Forga owns the neutral policy model, bounded authorization evaluation, typed query
+constraints, and optional framework integration.
+
 ## When To Use It
 
 Use Forga when an application needs authorization such as:
@@ -152,7 +160,8 @@ ObjectListingLookup objectListingLookup =
 ```
 
 Forward resolution powers `check` and `bulkCheck`. Reverse resolution powers `listObjects`.
-Attribute resolution is used for caveats and allowlisted query mappings.
+Hosts supply request attributes to caveat evaluation and MyBatis query mappings through the
+corresponding provider contracts. The evaluator does not perform implicit attribute lookups.
 
 Forga does not require a Forga-owned relationship table. Hosts may store relationships in their own
 schema, derive them from business tables, or resolve them from external services.
@@ -288,7 +297,10 @@ selected `ActiveScope`.
 Scope switch example:
 
 ```java
-ScopedAuthorizationService switchService = new ScopedAuthorizationService(evaluator);
+ObjectScopeResolver objectScopes =
+    object -> Optional.of(new ScopeRef("workspace", hostObjects.scopeId(object)));
+ScopedAuthorizationService switchService =
+    new ScopedAuthorizationService(evaluator, objectScopes);
 
 ScopeSwitchDecision decision =
     switchService.canSwitch(
@@ -495,7 +507,7 @@ Evaluation and listing enforce configured bounds:
 - max intermediate results
 - page size
 - batch size
-- deadline
+- per-evaluation timeout and propagated resolver deadline
 - cycle detection
 
 ## Disabled Behavior

@@ -3,13 +3,7 @@ package com.luokuiai.forga.spring;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.luokuiai.forga.core.context.AuthenticatedSubjectProvider;
-import com.luokuiai.forga.core.context.AuthorizationAttributesProvider;
 import com.luokuiai.forga.mybatis.ForgaMyBatisInterceptor;
-import com.luokuiai.forga.mybatis.MyBatisResourceMapping;
-import com.luokuiai.forga.mybatis.MyBatisStatementRegistry;
-import com.luokuiai.forga.query.QueryResource;
-import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -46,23 +40,8 @@ class ForgaEnablementTest {
   static class EnabledConfiguration {
 
     @Bean
-    MyBatisStatementRegistry myBatisStatementRegistry() {
-      return new MyBatisStatementRegistry(List.of());
-    }
-
-    @Bean
     AuthenticatedSubjectProvider authenticatedSubjectProvider() {
       return Optional::empty;
-    }
-
-    @Bean
-    AuthorizationAttributesProvider authorizationAttributesProvider() {
-      return Map::of;
-    }
-
-    @Bean
-    Map<QueryResource, MyBatisResourceMapping> myBatisResourceMappings() {
-      return Map.of();
     }
   }
 }

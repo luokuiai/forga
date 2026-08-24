@@ -15,11 +15,13 @@ import com.luokuiai.forga.core.policy.TraversalExpression;
 import com.luokuiai.forga.core.policy.UnionExpression;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -42,6 +44,8 @@ public final class AuthorizationEvaluator {
   private final EvaluationLimits limits;
 
   private final CaveatEvaluator caveats;
+
+  private final ListingCursorCodec cursorCodec;
 
   /**
    * Creates an evaluator.
@@ -107,6 +111,7 @@ public final class AuthorizationEvaluator {
     this.objectListings = objectListings;
     this.limits = Objects.requireNonNull(limits, "limits are required");
     this.caveats = Objects.requireNonNull(caveats, "caveats are required");
+    this.cursorCodec = new ListingCursorCodec();
   }
 
   /**
@@ -133,8 +138,11 @@ public final class AuthorizationEvaluator {
           .map(request -> new CheckDecision(request, false, DecisionReason.LIMIT_EXCEEDED))
           .toList();
     }
-    EvaluationState state = new EvaluationState();
-    return immutableRequests.stream().map(request -> check(request, state)).toList();
+    Map<RelationLookupRequest, List<RelationshipEntry>> sharedCache = new HashMap<>();
+    prefetchBulk(immutableRequests, new EvaluationState(sharedCache));
+    return immutableRequests.stream()
+        .map(request -> check(request, new EvaluationState(sharedCache)))
+        .toList();
   }
 
   /**
@@ -183,15 +191,22 @@ public final class AuthorizationEvaluator {
         cursorState.offset() >= allObjects.size()
             ? List.of()
             : allObjects.subList(cursorState.offset(), toIndex);
-    Optional<ListObjectsCursor> nextCursor =
-        toIndex < allObjects.size() || state.hasContinuation()
-            ? Optional.of(cursor(request, state, toIndex))
-            : Optional.empty();
+    boolean hasLocalResults = toIndex < allObjects.size();
+    Optional<ListObjectsCursor> nextCursor = Optional.empty();
+    if (hasLocalResults) {
+      nextCursor =
+          Optional.of(
+              cursor(request, state, toIndex, state.inputContinuationCursors));
+    } else if (state.hasContinuation()) {
+      nextCursor =
+          Optional.of(
+              cursor(request, state, 0, state.outputContinuationCursors));
+    }
     return ListObjectsResponse.success(request, page, nextCursor);
   }
 
   private CheckDecision check(CheckRequest request, EvaluationState state) {
-    state.proof.clear();
+    state.beginDecision();
     PermissionExpression expression = policy.definition().permissions().get(request.permission());
     if (expression == null) {
       return new CheckDecision(request, false, DecisionReason.UNKNOWN_PERMISSION);
@@ -200,6 +215,134 @@ public final class AuthorizationEvaluator {
     DecisionReason reason = allowed ? DecisionReason.ALLOWED : state.deniedReason;
     List<ProofStep> proof = allowed ? state.proof : List.of();
     return new CheckDecision(request, allowed, reason, proof);
+  }
+
+  private void prefetchBulk(List<CheckRequest> requests, EvaluationState state) {
+    List<BulkWork> frontier = new ArrayList<>();
+    for (CheckRequest request : requests) {
+      PermissionExpression expression = policy.definition().permissions().get(request.permission());
+      if (expression != null) {
+        frontier.add(new BulkWork(request, request.object(), expression));
+      }
+    }
+    Set<BulkWork> visited = new HashSet<>();
+    while (!frontier.isEmpty()) {
+      Map<RelationLookupRequest, List<BulkContinuation>> continuations = new LinkedHashMap<>();
+      ArrayDeque<BulkWork> pending = new ArrayDeque<>(frontier);
+      while (!pending.isEmpty()) {
+        expandBulkWork(pending.removeFirst(), pending, continuations, visited);
+      }
+      if (continuations.isEmpty() || !prefetchFrontier(continuations.keySet(), state)) {
+        return;
+      }
+      frontier = nextBulkFrontier(continuations, state);
+    }
+  }
+
+  private void expandBulkWork(
+      BulkWork work,
+      ArrayDeque<BulkWork> pending,
+      Map<RelationLookupRequest, List<BulkContinuation>> continuations,
+      Set<BulkWork> visited) {
+    if (!visited.add(work)) {
+      return;
+    }
+    PermissionExpression expression = work.expression();
+    if (expression instanceof RelationExpression relationExpression) {
+      addBulkContinuation(
+          continuations,
+          new RelationLookupRequest(work.object(), relationExpression.relation()),
+          new BulkContinuation(work.request(), Optional.empty()));
+    } else if (expression instanceof UnionExpression unionExpression) {
+      unionExpression.expressions().stream()
+          .map(child -> new BulkWork(work.request(), work.object(), child))
+          .forEach(pending::addLast);
+    } else if (expression instanceof IntersectionExpression intersectionExpression) {
+      intersectionExpression.expressions().stream()
+          .map(child -> new BulkWork(work.request(), work.object(), child))
+          .forEach(pending::addLast);
+    } else if (expression instanceof ExclusionExpression exclusionExpression) {
+      pending.addLast(
+          new BulkWork(work.request(), work.object(), exclusionExpression.base()));
+      pending.addLast(
+          new BulkWork(work.request(), work.object(), exclusionExpression.excluded()));
+    } else if (expression instanceof TraversalExpression traversalExpression) {
+      addBulkContinuation(
+          continuations,
+          new RelationLookupRequest(work.object(), traversalExpression.relation()),
+          new BulkContinuation(
+              work.request(), Optional.of(traversalExpression.expression())));
+    } else if (expression instanceof CaveatExpression caveatExpression
+        && caveats.evaluate(caveatExpression.caveat(), work.request())) {
+      pending.addLast(
+          new BulkWork(work.request(), work.object(), caveatExpression.expression()));
+    }
+  }
+
+  private static void addBulkContinuation(
+      Map<RelationLookupRequest, List<BulkContinuation>> continuations,
+      RelationLookupRequest request,
+      BulkContinuation continuation) {
+    continuations.computeIfAbsent(request, ignored -> new ArrayList<>()).add(continuation);
+  }
+
+  private boolean prefetchFrontier(
+      Set<RelationLookupRequest> frontier, EvaluationState state) {
+    List<RelationLookupRequest> missing =
+        frontier.stream().filter(request -> !state.cache.containsKey(request)).toList();
+    if (missing.isEmpty()) {
+      return true;
+    }
+    if (!state.allowResolverCall()) {
+      return false;
+    }
+    Map<RelationLookupRequest, List<RelationshipEntry>> resolved;
+    try {
+      resolved = relationships.resolve(missing, state.deadline);
+    } catch (RelationshipLookupException exception) {
+      state.deniedReason = exception.reason();
+      return false;
+    } catch (RuntimeException exception) {
+      state.deniedReason = DecisionReason.RESOLVER_FAILURE;
+      return false;
+    }
+    if (resolved == null) {
+      state.deniedReason = DecisionReason.RESOLVER_FAILURE;
+      return false;
+    }
+    for (RelationLookupRequest request : missing) {
+      List<RelationshipEntry> entries =
+          List.copyOf(resolved.getOrDefault(request, List.of()));
+      if (!state.allowIntermediateResults(entries.size())) {
+        return false;
+      }
+      state.cache.put(request, entries);
+    }
+    return true;
+  }
+
+  private static List<BulkWork> nextBulkFrontier(
+      Map<RelationLookupRequest, List<BulkContinuation>> continuations,
+      EvaluationState state) {
+    List<BulkWork> next = new ArrayList<>();
+    continuations.forEach(
+        (lookup, paths) ->
+            state.cache.getOrDefault(lookup, List.of()).stream()
+                .flatMap(entry -> entry.subjectSet().stream())
+                .forEach(
+                    subjectSet ->
+                        paths.forEach(
+                            path ->
+                                next.add(
+                                    new BulkWork(
+                                        path.request(),
+                                        subjectSet.object(),
+                                        path.traversalExpression()
+                                            .orElseGet(
+                                                () ->
+                                                    new RelationExpression(
+                                                        subjectSet.relation())))))));
+    return next;
   }
 
   private boolean evaluate(
@@ -216,17 +359,39 @@ public final class AuthorizationEvaluator {
       return matchesRelation(object, relationExpression.relation(), subject, state, depth);
     }
     if (expression instanceof UnionExpression unionExpression) {
-      return unionExpression.expressions().stream()
-          .anyMatch(branch -> evaluate(branch, request, object, subject, state, depth + 1));
+      for (PermissionExpression branch : unionExpression.expressions()) {
+        int checkpoint = state.proof.size();
+        if (evaluate(branch, request, object, subject, state, depth + 1)) {
+          return true;
+        }
+        state.rollbackProof(checkpoint);
+      }
+      return false;
     }
     if (expression instanceof IntersectionExpression intersectionExpression) {
-      return intersectionExpression.expressions().stream()
-          .allMatch(branch -> evaluate(branch, request, object, subject, state, depth + 1));
+      int checkpoint = state.proof.size();
+      for (PermissionExpression branch : intersectionExpression.expressions()) {
+        if (!evaluate(branch, request, object, subject, state, depth + 1)) {
+          state.rollbackProof(checkpoint);
+          return false;
+        }
+      }
+      return true;
     }
     if (expression instanceof ExclusionExpression exclusionExpression) {
-      return evaluate(exclusionExpression.base(), request, object, subject, state, depth + 1)
-          && !evaluate(
-              exclusionExpression.excluded(), request, object, subject, state, depth + 1);
+      int checkpoint = state.proof.size();
+      if (!evaluate(exclusionExpression.base(), request, object, subject, state, depth + 1)) {
+        state.rollbackProof(checkpoint);
+        return false;
+      }
+      int baseProofEnd = state.proof.size();
+      if (evaluate(
+          exclusionExpression.excluded(), request, object, subject, state, depth + 1)) {
+        state.rollbackProof(checkpoint);
+        return false;
+      }
+      state.rollbackProof(baseProofEnd);
+      return true;
     }
     if (expression instanceof TraversalExpression traversalExpression) {
       return traverse(traversalExpression, request, object, subject, state, depth);
@@ -245,12 +410,24 @@ public final class AuthorizationEvaluator {
       SubjectRef subject,
       EvaluationState state,
       int depth) {
-    return lookup(new RelationLookupRequest(object, expression.relation()), state).stream()
-        .flatMap(entry -> entry.subjectSet().stream())
-        .map(SubjectSetRef::object)
-        .anyMatch(
-            nextObject ->
-                evaluate(expression.expression(), request, nextObject, subject, state, depth + 1));
+    List<SubjectSetRef> subjectSets =
+        lookup(new RelationLookupRequest(object, expression.relation()), state).stream()
+            .flatMap(entry -> entry.subjectSet().stream())
+            .toList();
+    for (SubjectSetRef subjectSet : subjectSets) {
+      int checkpoint = state.proof.size();
+      if (evaluate(
+          expression.expression(),
+          request,
+          subjectSet.object(),
+          subject,
+          state,
+          depth + 1)) {
+        return true;
+      }
+      state.rollbackProof(checkpoint);
+    }
+    return false;
   }
 
   private boolean matchesRelation(
@@ -264,8 +441,14 @@ public final class AuthorizationEvaluator {
       return false;
     }
     try {
-      return lookup(request, state).stream()
-          .anyMatch(entry -> matchesEntry(entry, object, relation, subject, state, depth));
+      for (RelationshipEntry entry : lookup(request, state)) {
+        int checkpoint = state.proof.size();
+        if (matchesEntry(entry, object, relation, subject, state, depth)) {
+          return true;
+        }
+        state.rollbackProof(checkpoint);
+      }
+      return false;
     } finally {
       state.exit(request);
     }
@@ -293,24 +476,31 @@ public final class AuthorizationEvaluator {
   }
 
   private List<RelationshipEntry> lookup(RelationLookupRequest request, EvaluationState state) {
-    if (state.cache.containsKey(request)) {
-      return state.cache.get(request);
-    }
-    if (!state.allowResolverCall()) {
+    if (!state.allowResolverCall(request)) {
       return List.of();
+    }
+    if (state.cache.containsKey(request)) {
+      List<RelationshipEntry> entries = state.cache.get(request);
+      return state.allowIntermediateResults(entries.size()) ? entries : List.of();
     }
     List<RelationshipEntry> entries;
     try {
       entries =
-          List.copyOf(relationships.resolve(List.of(request)).getOrDefault(request, List.of()));
+          List.copyOf(
+              relationships
+                  .resolve(List.of(request), state.deadline)
+                  .getOrDefault(request, List.of()));
     } catch (RelationshipLookupException exception) {
+      state.forgetResolverCall(request);
       state.deniedReason = exception.reason();
       return List.of();
     } catch (RuntimeException exception) {
+      state.forgetResolverCall(request);
       state.deniedReason = DecisionReason.RESOLVER_FAILURE;
       return List.of();
     }
     if (!state.allowIntermediateResults(entries.size())) {
+      state.forgetResolverCall(request);
       return List.of();
     }
     state.cache.put(request, entries);
@@ -449,7 +639,7 @@ public final class AuthorizationEvaluator {
     }
     ObjectListingPage page;
     try {
-      page = objectListings.resolve(List.of(request)).get(request);
+      page = objectListings.resolve(List.of(request), state.deadline).get(request);
     } catch (RelationshipLookupException exception) {
       state.deniedReason = exception.reason();
       return Set.of();
@@ -485,15 +675,11 @@ public final class AuthorizationEvaluator {
     if (request.cursor().isEmpty()) {
       return ListingCursorState.initial(request.consistency());
     }
-    String payload;
-    try {
-      payload =
-          new String(
-              Base64.getUrlDecoder().decode(request.cursor().orElseThrow().token()),
-              StandardCharsets.UTF_8);
-    } catch (IllegalArgumentException exception) {
+    Optional<String> decoded = cursorCodec.decode(request.cursor().orElseThrow());
+    if (decoded.isEmpty()) {
       return ListingCursorState.invalid();
     }
+    String payload = decoded.orElseThrow();
     List<String> parts = payload.lines().toList();
     if (parts.size() != 4 || !decode(parts.get(0)).equals(cursorBinding(request))) {
       return ListingCursorState.invalid();
@@ -514,19 +700,19 @@ public final class AuthorizationEvaluator {
     }
   }
 
-  private ListObjectsCursor cursor(ListObjectsRequest request, EvaluationState state, int offset) {
+  private ListObjectsCursor cursor(
+      ListObjectsRequest request,
+      EvaluationState state,
+      int offset,
+      Map<String, ListObjectsCursor> continuations) {
     String payload =
         String.join(
             "\n",
             encode(cursorBinding(request)),
             String.valueOf(offset),
             state.consistency.map(ConsistencyToken::value).orElse("-"),
-            continuations(state.continuationCursors));
-    String token =
-        Base64.getUrlEncoder()
-            .withoutPadding()
-            .encodeToString(payload.getBytes(StandardCharsets.UTF_8));
-    return new ListObjectsCursor(token);
+            continuations(continuations));
+    return cursorCodec.encode(payload);
   }
 
   private String cursorBinding(ListObjectsRequest request) {
@@ -537,7 +723,7 @@ public final class AuthorizationEvaluator {
             .collect(Collectors.joining("&"));
     return String.join(
         "\n",
-        "v1",
+        "v2",
         policy.fingerprint(),
         request.objectType(),
         request.permission().name(),
@@ -614,6 +800,14 @@ public final class AuthorizationEvaluator {
     return new String(Base64.getUrlDecoder().decode(value), StandardCharsets.UTF_8);
   }
 
+  private record BulkWork(
+      CheckRequest request, ObjectRef object, PermissionExpression expression) {
+  }
+
+  private record BulkContinuation(
+      CheckRequest request, Optional<PermissionExpression> traversalExpression) {
+  }
+
   private record ListingCursorState(
       boolean valid,
       int offset,
@@ -636,11 +830,15 @@ public final class AuthorizationEvaluator {
 
   private final class EvaluationState {
 
-    private final Map<RelationLookupRequest, List<RelationshipEntry>> cache = new HashMap<>();
+    private final Map<RelationLookupRequest, List<RelationshipEntry>> cache;
+
+    private final Set<RelationLookupRequest> accountedLookups = new HashSet<>();
 
     private final Map<ReverseRelationLookupRequest, Set<ObjectRef>> reverseCache = new HashMap<>();
 
-    private final Map<String, ListObjectsCursor> continuationCursors = new HashMap<>();
+    private final Map<String, ListObjectsCursor> inputContinuationCursors = new HashMap<>();
+
+    private final Map<String, ListObjectsCursor> outputContinuationCursors = new HashMap<>();
 
     private final List<ProofStep> proof = new ArrayList<>();
 
@@ -650,20 +848,39 @@ public final class AuthorizationEvaluator {
 
     private int visitedNodes;
 
+    private final Optional<Instant> deadline;
+
     private Optional<ConsistencyToken> consistency = Optional.empty();
 
     private DecisionReason deniedReason = DecisionReason.NO_MATCH;
 
     EvaluationState() {
+      this(new HashMap<>());
+    }
+
+    EvaluationState(Map<RelationLookupRequest, List<RelationshipEntry>> cache) {
+      this.cache = Objects.requireNonNull(cache, "cache is required");
+      deadline = limits.timeout().map(timeout -> Instant.now().plus(timeout));
     }
 
     EvaluationState(ListingCursorState cursorState) {
+      this();
       consistency = cursorState.consistency();
-      continuationCursors.putAll(cursorState.continuations());
+      inputContinuationCursors.putAll(cursorState.continuations());
+    }
+
+    void beginDecision() {
+      proof.clear();
+      activePath.clear();
+      deniedReason = DecisionReason.NO_MATCH;
+    }
+
+    void rollbackProof(int size) {
+      proof.subList(size, proof.size()).clear();
     }
 
     boolean allowProgress(int depth) {
-      if (limits.deadline().filter(deadline -> !Instant.now().isBefore(deadline)).isPresent()) {
+      if (deadline.filter(value -> !Instant.now().isBefore(value)).isPresent()) {
         deniedReason = DecisionReason.DEADLINE_EXCEEDED;
         return false;
       }
@@ -688,6 +905,21 @@ public final class AuthorizationEvaluator {
       return true;
     }
 
+    boolean allowResolverCall(RelationLookupRequest request) {
+      if (accountedLookups.contains(request)) {
+        return true;
+      }
+      if (!allowResolverCall()) {
+        return false;
+      }
+      accountedLookups.add(request);
+      return true;
+    }
+
+    void forgetResolverCall(RelationLookupRequest request) {
+      accountedLookups.remove(request);
+    }
+
     boolean allowIntermediateResults(int count) {
       if (count > limits.maxIntermediateResults()) {
         deniedReason = DecisionReason.LIMIT_EXCEEDED;
@@ -710,19 +942,19 @@ public final class AuthorizationEvaluator {
     }
 
     Optional<ListObjectsCursor> continuation(String key) {
-      return Optional.ofNullable(continuationCursors.get(key));
+      return Optional.ofNullable(inputContinuationCursors.get(key));
     }
 
     void recordContinuation(String key, Optional<ListObjectsCursor> cursor) {
       if (cursor.isPresent()) {
-        continuationCursors.put(key, cursor.orElseThrow());
+        outputContinuationCursors.put(key, cursor.orElseThrow());
       } else {
-        continuationCursors.remove(key);
+        outputContinuationCursors.remove(key);
       }
     }
 
     boolean hasContinuation() {
-      return !continuationCursors.isEmpty();
+      return !outputContinuationCursors.isEmpty();
     }
 
     boolean acceptConsistency(Optional<ConsistencyToken> token) {

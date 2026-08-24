@@ -277,6 +277,27 @@ class AuthorizationObjectListingTest {
   }
 
   @Test
+  void rejectsModifiedCursor() {
+    CountingListingLookup listing = new CountingListingLookup();
+    listing.put(direct("document", VIEWER), List.of(DOCUMENT_1, DOCUMENT_2));
+    AuthorizationEvaluator evaluator = evaluator(relationPolicy(), listing);
+    ListObjectsResponse first =
+        evaluator.listObjects(new ListObjectsRequest("document", VIEW, ALICE, 1));
+    String token = first.nextCursor().orElseThrow().token();
+    char replacement = token.charAt(token.length() - 1) == 'A' ? 'B' : 'A';
+    ListObjectsCursor modified =
+        new ListObjectsCursor(token.substring(0, token.length() - 1) + replacement);
+
+    ListObjectsResponse response =
+        evaluator.listObjects(
+            new ListObjectsRequest(
+                "document", VIEW, ALICE, 1, Optional.of(modified), Map.of()));
+
+    assertThat(response.successful()).isFalse();
+    assertThat(response.reason()).isEqualTo(DecisionReason.INVALID_CURSOR);
+  }
+
+  @Test
   void finalPageHasNoCursorAndNoDuplicates() {
     CountingListingLookup listing = new CountingListingLookup();
     listing.put(direct("document", VIEWER), List.of(DOCUMENT_1, DOCUMENT_1, DOCUMENT_2));
@@ -341,11 +362,47 @@ class AuthorizationObjectListingTest {
 
     ListObjectsResponse first =
         evaluator.listObjects(new ListObjectsRequest("document", VIEW, ALICE, 1));
-    evaluator.listObjects(
+    ListObjectsResponse second =
+        evaluator.listObjects(
         new ListObjectsRequest("document", VIEW, ALICE, 1, first.nextCursor(), Map.of()));
+    evaluator.listObjects(
+        new ListObjectsRequest("document", VIEW, ALICE, 1, second.nextCursor(), Map.of()));
 
-    assertThat(listing.requests()).hasSize(2);
-    assertThat(listing.requests().get(1).cursor()).contains(resolverCursor);
+    assertThat(listing.requests()).hasSize(3);
+    assertThat(listing.requests().get(1).cursor()).isEmpty();
+    assertThat(listing.requests().get(2).cursor()).contains(resolverCursor);
+  }
+
+  @Test
+  void returnsEveryObjectAcrossResolverContinuationPages() {
+    ListObjectsCursor resolverCursor = new ListObjectsCursor("resolver-page-2");
+    ObjectListingLookup listing =
+        requests -> {
+          ReverseRelationLookupRequest request = requests.get(0);
+          ObjectListingPage page =
+              request.cursor().isEmpty()
+                  ? new ObjectListingPage(
+                      List.of(DOCUMENT_1, DOCUMENT_2), Optional.of(resolverCursor))
+                  : new ObjectListingPage(List.of(DOCUMENT_3));
+          return Map.of(request, page);
+        };
+    AuthorizationEvaluator evaluator = evaluator(relationPolicy(), listing);
+
+    ListObjectsResponse first =
+        evaluator.listObjects(new ListObjectsRequest("document", VIEW, ALICE, 1));
+    ListObjectsResponse second =
+        evaluator.listObjects(
+            new ListObjectsRequest(
+                "document", VIEW, ALICE, 1, first.nextCursor(), Map.of()));
+    ListObjectsResponse third =
+        evaluator.listObjects(
+            new ListObjectsRequest(
+                "document", VIEW, ALICE, 1, second.nextCursor(), Map.of()));
+
+    assertThat(first.objects()).containsExactly(DOCUMENT_1);
+    assertThat(second.objects()).containsExactly(DOCUMENT_2);
+    assertThat(third.objects()).containsExactly(DOCUMENT_3);
+    assertThat(third.nextCursor()).isEmpty();
   }
 
   @Test

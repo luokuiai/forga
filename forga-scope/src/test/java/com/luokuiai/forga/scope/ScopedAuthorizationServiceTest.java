@@ -45,7 +45,9 @@ class ScopedAuthorizationServiceTest {
         new RelationLookupRequest(ALPHA.toObjectRef(), ScopePolicyTemplates.MEMBER),
         RelationshipEntry.subject(ALICE));
     ScopedAuthorizationService service =
-        new ScopedAuthorizationService(evaluator(ScopePolicyTemplates.enterScopePolicy(), lookup));
+        new ScopedAuthorizationService(
+            evaluator(ScopePolicyTemplates.enterScopePolicy(), lookup),
+            object -> Optional.empty());
 
     ScopeSwitchDecision decision =
         service.canSwitch(
@@ -59,7 +61,8 @@ class ScopedAuthorizationServiceTest {
   void deniesScopeSwitchWithoutRequiredRelation() {
     ScopedAuthorizationService service =
         new ScopedAuthorizationService(
-            evaluator(ScopePolicyTemplates.enterScopePolicy(), new CountingLookup()));
+            evaluator(ScopePolicyTemplates.enterScopePolicy(), new CountingLookup()),
+            object -> Optional.empty());
 
     ScopeSwitchDecision decision =
         service.canSwitch(new ScopeSwitchRequest(ALICE, BETA, ScopePolicyTemplates.ENTER));
@@ -75,7 +78,9 @@ class ScopedAuthorizationServiceTest {
           throw new RelationshipLookupException(DecisionReason.RESOLVER_FAILURE, "down");
         };
     ScopedAuthorizationService service =
-        new ScopedAuthorizationService(evaluator(ScopePolicyTemplates.enterScopePolicy(), lookup));
+        new ScopedAuthorizationService(
+            evaluator(ScopePolicyTemplates.enterScopePolicy(), lookup),
+            object -> Optional.empty());
 
     ScopeSwitchDecision decision =
         service.canSwitch(new ScopeSwitchRequest(ALICE, ALPHA, ScopePolicyTemplates.ENTER));
@@ -92,7 +97,8 @@ class ScopedAuthorizationServiceTest {
         RelationshipEntry.subject(ALICE));
     lookup.put(new RelationLookupRequest(REPORT, VIEWER), RelationshipEntry.subject(ALICE));
     ScopedAuthorizationService service =
-        new ScopedAuthorizationService(scopedPermissionEvaluator(lookup));
+        new ScopedAuthorizationService(
+            scopedPermissionEvaluator(lookup), object -> Optional.of(ALPHA));
 
     ScopedPermissionDecision decision =
         service.check(
@@ -337,7 +343,8 @@ class ScopedAuthorizationServiceTest {
   @Test
   void deniesScopedPermissionWithoutActiveScope() {
     ScopedAuthorizationService service =
-        new ScopedAuthorizationService(scopedPermissionEvaluator(new CountingLookup()));
+        new ScopedAuthorizationService(
+            scopedPermissionEvaluator(new CountingLookup()), object -> Optional.empty());
 
     ScopedPermissionDecision decision =
         service.check(
@@ -355,7 +362,8 @@ class ScopedAuthorizationServiceTest {
         RelationshipEntry.subject(ALICE));
     lookup.put(new RelationLookupRequest(REPORT, VIEWER), RelationshipEntry.subject(ALICE));
     ScopedAuthorizationService service =
-        new ScopedAuthorizationService(scopedPermissionEvaluator(lookup));
+        new ScopedAuthorizationService(
+            scopedPermissionEvaluator(lookup), object -> Optional.of(ALPHA));
 
     ScopedPermissionDecision decision =
         service.check(
@@ -378,7 +386,9 @@ class ScopedAuthorizationServiceTest {
         new RelationLookupRequest(BETA.toObjectRef(), ScopePolicyTemplates.DENIED),
         RelationshipEntry.subject(ALICE));
     ScopedAuthorizationService service =
-        new ScopedAuthorizationService(evaluator(ScopePolicyTemplates.enterScopePolicy(), lookup));
+        new ScopedAuthorizationService(
+            evaluator(ScopePolicyTemplates.enterScopePolicy(), lookup),
+            object -> Optional.empty());
 
     ScopeSwitchDecision allowed =
         service.canSwitch(new ScopeSwitchRequest(ALICE, ALPHA, ScopePolicyTemplates.ENTER));

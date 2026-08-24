@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.luokuiai.forga.core.context.AuthenticatedSubjectProvider;
 import com.luokuiai.forga.core.context.AuthorizationAttributesProvider;
-import com.luokuiai.forga.core.model.PermissionRef;
 import com.luokuiai.forga.core.model.SubjectRef;
 import com.luokuiai.forga.mybatis.MyBatisAuthorizationBoundary;
 import com.luokuiai.forga.mybatis.MyBatisResourceMapping;
@@ -53,8 +52,7 @@ class ForgaMyBatisAutoConfigurationSupportTest {
                 subject));
     return new MyBatisStatementRegistry(
         List.of(
-            new MyBatisStatementAuthorization(
-                "Mapper.select", RESOURCE, new PermissionRef("view"), boundary)));
+            new MyBatisStatementAuthorization("Mapper.select", boundary)));
   }
 
   private static Map<QueryResource, MyBatisResourceMapping> mappings() {
