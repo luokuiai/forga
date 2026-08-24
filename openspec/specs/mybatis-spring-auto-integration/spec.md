@@ -4,8 +4,8 @@
 TBD - created by archiving change add-mybatis-spring-auto-integration. Update Purpose after archive.
 ## Requirements
 ### Requirement: Statement metadata driven authorization
-The integration MUST apply authorization only at statement ids explicitly registered with neutral
-statement metadata.
+The integration MUST apply authorization only at statement ids explicitly registered with a typed
+authorization boundary. Statement declarations MUST contain only metadata consumed by enforcement.
 
 #### Scenario: Configured statement is authorized
 - **WHEN** a configured MyBatis statement executes while Forga is enabled
@@ -29,8 +29,8 @@ interfaces and MUST NOT define host-domain authentication context.
 
 ### Requirement: Conditional Spring registration
 The Spring integration MUST register MyBatis authorization components only when a host composition
-root explicitly declares `@EnableForga`. Environment properties MUST NOT alter this registration
-decision.
+root explicitly declares `@EnableForga` and MyBatis is present. Environment properties MUST NOT
+alter this registration decision.
 
 #### Scenario: Integration disabled
 - **WHEN** the Starter is present without `@EnableForga`
@@ -41,19 +41,65 @@ decision.
 - **THEN** no MyBatis authorization interceptor is registered
 
 #### Scenario: Integration explicitly enabled
-- **WHEN** a host composition root declares `@EnableForga` and required MyBatis infrastructure is
-  complete
+- **WHEN** a host composition root declares `@EnableForga`, MyBatis is present, and an authentication
+  provider is available
 - **THEN** the Forga MyBatis authorization interceptor is registered
 - **AND** registration does not require a separate integration properties bean
 
+#### Scenario: MyBatis is absent
+- **WHEN** a host composition root declares `@EnableForga` but MyBatis is not on the classpath
+- **THEN** no Forga MyBatis infrastructure is registered
+
+### Requirement: Starter-managed MyBatis assembly
+The Spring integration MUST assemble derivable MyBatis infrastructure from typed host declarations
+and MUST preserve explicit host overrides.
+
+#### Scenario: Typed declarations are present
+- **WHEN** a host declares `MyBatisStatementAuthorization` and `MyBatisResourceMapping` beans
+- **THEN** the starter aggregates them into the default statement registry and interceptor
+- **AND** no raw resource-mapping `Map` bean is required
+
+#### Scenario: No request attributes provider is declared
+- **WHEN** a host does not declare an `AuthorizationAttributesProvider`
+- **THEN** the starter registers an empty attributes provider
+
+#### Scenario: No statement declarations are present
+- **WHEN** MyBatis integration is enabled without statement authorization declarations
+- **THEN** the starter registers an empty statement registry
+- **AND** unconfigured statements remain unchanged
+
+#### Scenario: Host override is present
+- **WHEN** a host declares a registry, attributes provider, or Forga MyBatis interceptor bean
+- **THEN** the corresponding starter default backs off
+
+#### Scenario: Duplicate resource declarations are present
+- **WHEN** multiple resource mapping beans declare the same query resource
+- **THEN** application startup fails with a configuration error identifying the duplicate resource
+
+### Requirement: Explicit authenticated subject ownership
+The Spring integration MUST require exactly one authenticated subject provider and MUST NOT create a
+default identity.
+
+#### Scenario: Authentication provider is absent
+- **WHEN** Forga is explicitly enabled without an authentication provider
+- **THEN** application startup fails with the authentication-provider validation error
+
 ### Requirement: Safe SQL rewriting
-The MyBatis integration MUST append at most one translated authorization predicate to supported
-SELECT SQL and MUST reject unsupported SQL while enabled.
+The MyBatis integration MUST apply at most one translated authorization constraint to the exact
+`BoundSql` instance executed for a supported SELECT and MUST reject unsupported SQL while enabled.
 
 #### Scenario: Supported select query
 - **WHEN** a configured SELECT statement executes
-- **THEN** the integration appends one parameterized authorization predicate
+- **THEN** the database receives one parameterized authorization constraint on that query
+
+#### Scenario: Query contains trailing clauses
+- **WHEN** a configured SELECT contains top-level ordering or pagination clauses
+- **THEN** the authorization predicate is inserted at the correct SELECT AST location
 
 #### Scenario: Unsupported query shape
-- **WHEN** a configured non-SELECT statement executes while enabled
+- **WHEN** a configured non-SELECT or unsupported SELECT statement executes while enabled
 - **THEN** the integration fails closed before SQL execution
+
+#### Scenario: Integration is disabled
+- **WHEN** a statement executes while Forga integration is disabled
+- **THEN** the executable SQL and its parameters remain unchanged

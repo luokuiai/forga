@@ -15,4 +15,8 @@ public final class MyBatisTranslationException extends RuntimeException {
   public MyBatisTranslationException(String message) {
     super(message);
   }
+
+  MyBatisTranslationException(String message, Throwable cause) {
+    super(message, cause);
+  }
 }

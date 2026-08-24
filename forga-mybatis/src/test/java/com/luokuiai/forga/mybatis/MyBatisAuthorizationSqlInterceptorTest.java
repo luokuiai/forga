@@ -6,7 +6,6 @@ import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException
 
 import com.luokuiai.forga.core.context.AuthenticatedSubjectProvider;
 import com.luokuiai.forga.core.context.AuthorizationAttributesProvider;
-import com.luokuiai.forga.core.model.PermissionRef;
 import com.luokuiai.forga.core.model.SubjectRef;
 import com.luokuiai.forga.query.PredicateOperator;
 import com.luokuiai.forga.query.QueryConstraint;
@@ -21,8 +20,6 @@ import org.junit.jupiter.api.Test;
 class MyBatisAuthorizationSqlInterceptorTest {
 
   private static final QueryResource RESOURCE = new QueryResource("resource");
-
-  private static final PermissionRef VIEW = new PermissionRef("view");
 
   @Test
   void appliesConstraintForConfiguredSelectStatement() {
@@ -132,7 +129,7 @@ class MyBatisAuthorizationSqlInterceptorTest {
                 new com.luokuiai.forga.query.QueryField(RESOURCE, "owner"),
                 PredicateOperator.EQUALS,
                 subject));
-    return new MyBatisStatementAuthorization("Mapper.select", RESOURCE, VIEW, boundary);
+    return new MyBatisStatementAuthorization("Mapper.select", boundary);
   }
 
   private static MyBatisStatementAuthorization scopedStatement() {
@@ -144,6 +141,6 @@ class MyBatisAuthorizationSqlInterceptorTest {
                 new com.luokuiai.forga.query.QueryField(RESOURCE, "owner"),
                 PredicateOperator.EQUALS,
                 scope));
-    return new MyBatisStatementAuthorization("Mapper.scoped", RESOURCE, VIEW, boundary);
+    return new MyBatisStatementAuthorization("Mapper.scoped", boundary);
   }
 }

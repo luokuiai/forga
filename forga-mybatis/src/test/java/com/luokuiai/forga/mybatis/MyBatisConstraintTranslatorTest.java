@@ -145,13 +145,72 @@ class MyBatisConstraintTranslatorTest {
     assertThat(applied.sql())
         .isEqualTo(
             "SELECT outer_table.*, related_table.relation AS forga_relation "
-                + "FROM outer_table JOIN related_table "
+                + "FROM outer_table INNER JOIN related_table "
                 + "ON outer_table.id = related_table.outer_id "
-                + "WHERE outer_table.deleted = 0 "
+                + "WHERE (outer_table.deleted = 0) "
                 + "AND (related_table.subject_id = #{forga.parameters.subject}) "
                 + "ORDER BY related_table.rank DESC, outer_table.state ASC, "
                 + "outer_table.id ASC LIMIT 20");
     assertThat(applied.parameters()).containsExactly(subject);
+  }
+
+  @Test
+  void appliesConstraintBeforeTrailingClausesAndIgnoresClauseTextInLiteral() {
+    MyBatisAuthorizationBoundary boundary = stateBoundary(PredicateOperator.EQUALS);
+
+    MyBatisBoundSql applied =
+        new MyBatisConstraintApplicator(translator())
+            .apply(
+                "SELECT * FROM outer_table WHERE state <> 'order by hidden' "
+                    + "ORDER BY id LIMIT 5;",
+                Optional.of(boundary),
+                true);
+
+    assertThat(applied.sql())
+        .isEqualTo(
+            "SELECT * FROM outer_table WHERE (state <> 'order by hidden') "
+                + "AND (outer_table.state = #{forga.parameters.state}) ORDER BY id LIMIT 5");
+  }
+
+  @Test
+  void appliesConstraintOnlyToTopLevelSelectWithNestedQuery() {
+    MyBatisAuthorizationBoundary boundary = stateBoundary(PredicateOperator.EQUALS);
+
+    MyBatisBoundSql applied =
+        new MyBatisConstraintApplicator(translator())
+            .apply(
+                "SELECT * FROM outer_table WHERE id IN "
+                    + "(SELECT outer_id FROM related_table WHERE relation = 'viewer')",
+                Optional.of(boundary),
+                true);
+
+    assertThat(applied.sql())
+        .isEqualTo(
+            "SELECT * FROM outer_table WHERE (id IN (SELECT outer_id FROM related_table "
+                + "WHERE relation = 'viewer')) AND "
+                + "(outer_table.state = #{forga.parameters.state})");
+  }
+
+  @Test
+  void rejectsSetOperationsAndCollectionlessInOperand() {
+    MyBatisConstraintApplicator applicator = new MyBatisConstraintApplicator(translator());
+
+    assertThatExceptionOfType(MyBatisTranslationException.class)
+        .isThrownBy(
+            () ->
+                applicator.apply(
+                    "SELECT * FROM outer_table UNION SELECT * FROM outer_table",
+                    Optional.of(stateBoundary(PredicateOperator.EQUALS)),
+                    true))
+        .withMessageContaining("plain SELECT");
+    assertThatExceptionOfType(MyBatisTranslationException.class)
+        .isThrownBy(
+            () ->
+                applicator.apply(
+                    "SELECT * FROM outer_table",
+                    Optional.of(stateBoundary(PredicateOperator.IN)),
+                    true))
+        .withMessageContaining("collection");
   }
 
   @Test
@@ -209,5 +268,14 @@ class MyBatisConstraintTranslatorTest {
                     "relation",
                     "rank",
                     "rank"))));
+  }
+
+  private static MyBatisAuthorizationBoundary stateBoundary(PredicateOperator operator) {
+    return new MyBatisAuthorizationBoundary(
+        "outer-list",
+        QueryConstraint.predicate(
+            OUTER_QUERY.field("state"),
+            operator,
+            new QueryParameter("state", QueryValueType.STRING)));
   }
 }

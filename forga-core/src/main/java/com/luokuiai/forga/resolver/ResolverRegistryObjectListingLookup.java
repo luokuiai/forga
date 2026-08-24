@@ -9,11 +9,13 @@ import com.luokuiai.forga.core.eval.ReverseLookupSubject;
 import com.luokuiai.forga.core.eval.ReverseRelationLookupRequest;
 import com.luokuiai.forga.core.eval.SubjectSetReverseLookupSubject;
 import java.util.ArrayList;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /** Adapts registered reverse relationship resolvers to evaluator object listings. */
 public final class ResolverRegistryObjectListingLookup implements ObjectListingLookup {
@@ -32,6 +34,12 @@ public final class ResolverRegistryObjectListingLookup implements ObjectListingL
   @Override
   public Map<ReverseRelationLookupRequest, ObjectListingPage> resolve(
       List<ReverseRelationLookupRequest> requests) {
+    return resolve(requests, Optional.empty());
+  }
+
+  @Override
+  public Map<ReverseRelationLookupRequest, ObjectListingPage> resolve(
+      List<ReverseRelationLookupRequest> requests, Optional<Instant> deadline) {
     List<ReverseRelationLookupRequest> unique = uniqueRequests(requests);
     if (unique.isEmpty()) {
       return Map.of();
@@ -52,7 +60,7 @@ public final class ResolverRegistryObjectListingLookup implements ObjectListingL
     grouped.forEach(
         (resolver, groupedRequests) ->
             ResolverLookupSupport.batches(groupedRequests)
-                .forEach(batch -> resolveBatch(resolver, batch, resolved)));
+                .forEach(batch -> resolveBatch(resolver, batch, deadline, resolved)));
     return Map.copyOf(resolved);
   }
 
@@ -65,6 +73,7 @@ public final class ResolverRegistryObjectListingLookup implements ObjectListingL
   private static void resolveBatch(
       RelationshipResolver resolver,
       List<ReverseRelationLookupRequest> requests,
+      Optional<Instant> deadline,
       Map<ReverseRelationLookupRequest, ObjectListingPage> resolved) {
     Map<ReverseRelationshipRequest, ReverseRelationLookupRequest> submitted = new LinkedHashMap<>();
     for (ReverseRelationLookupRequest request : requests) {
@@ -76,7 +85,8 @@ public final class ResolverRegistryObjectListingLookup implements ObjectListingL
               request.cursor().map(cursor -> new PageCursor(cursor.token())),
               Math.min(request.limit(), ResolverBounds.MAX_LIMIT),
               new ResolverContext(
-                  new ConsistencyContext(request.consistency()), java.util.Optional.empty()));
+                  new ConsistencyContext(request.consistency()),
+                  deadline.map(ResolverDeadline::new)));
       submitted.put(resolverRequest, request);
     }
 

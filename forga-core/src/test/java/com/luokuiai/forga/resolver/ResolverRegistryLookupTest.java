@@ -17,6 +17,7 @@ import com.luokuiai.forga.core.model.ObjectRef;
 import com.luokuiai.forga.core.model.RelationRef;
 import com.luokuiai.forga.core.model.SubjectRef;
 import com.luokuiai.forga.core.model.SubjectSetRef;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -34,6 +35,7 @@ class ResolverRegistryLookupTest {
 
   @Test
   void forwardLookupRoutesBatchesAndConvertsSubjectShapes() {
+    Instant deadline = Instant.now().plusSeconds(5);
     SubjectSetRef teamMembers =
         new SubjectSetRef(new ObjectRef("team", "engineering"), new RelationRef("member"));
     TestResolver viewerResolver =
@@ -73,10 +75,12 @@ class ResolverRegistryLookupTest {
         new RelationLookupRequest(new ObjectRef("document", "two"), EDITOR);
 
     Map<RelationLookupRequest, List<RelationshipEntry>> result =
-        lookup.resolve(List.of(viewer, editor, viewer));
+        lookup.resolve(List.of(viewer, editor, viewer), Optional.of(deadline));
 
     assertThat(viewerResolver.forwardCalls).isOne();
     assertThat(editorResolver.forwardCalls).isOne();
+    assertThat(viewerResolver.lastForwardRequest.context().deadline())
+        .contains(new ResolverDeadline(deadline));
     assertThat(result).containsOnlyKeys(viewer, editor);
     assertThat(result.get(viewer)).hasSize(2);
     assertThat(result.get(viewer).get(0).subject()).contains(ALICE);
@@ -86,6 +90,7 @@ class ResolverRegistryLookupTest {
 
   @Test
   void reverseLookupPreservesCursorConsistencyAndBounds() {
+    Instant deadline = Instant.now().plusSeconds(5);
     ConsistencyToken consistency = new ConsistencyToken("revision-7");
     ObjectRef document = new ObjectRef("document", "one");
     TestResolver resolver =
@@ -116,12 +121,15 @@ class ResolverRegistryLookupTest {
             Optional.of(consistency),
             2_000);
 
-    ObjectListingPage page = lookup.resolve(List.of(request)).get(request);
+    ObjectListingPage page =
+        lookup.resolve(List.of(request), Optional.of(deadline)).get(request);
 
     assertThat(resolver.reverseCalls).isOne();
     assertThat(resolver.lastReverseRequest.limit()).isEqualTo(ResolverBounds.MAX_LIMIT);
     assertThat(resolver.lastReverseRequest.cursor()).contains(new PageCursor("current-page"));
     assertThat(resolver.lastReverseRequest.context().consistency().token()).contains(consistency);
+    assertThat(resolver.lastReverseRequest.context().deadline())
+        .contains(new ResolverDeadline(deadline));
     assertThat(resolver.lastReverseRequest.subject()).isEqualTo(new DirectSubject(ALICE));
     assertThat(page.objects()).containsExactly(document);
     assertThat(page.nextCursor()).contains(new ListObjectsCursor("next-page"));
@@ -206,6 +214,8 @@ class ResolverRegistryLookupTest {
 
     private ReverseRelationshipRequest lastReverseRequest;
 
+    private ForwardRelationshipRequest lastForwardRequest;
+
     private TestResolver(
         String name,
         Set<RelationRef> forwardRelations,
@@ -228,6 +238,7 @@ class ResolverRegistryLookupTest {
     public ForwardRelationshipBatchResponse resolveForward(
         ForwardRelationshipBatchRequest request) {
       forwardCalls++;
+      lastForwardRequest = request.requests().get(0);
       return forward.apply(request);
     }
 

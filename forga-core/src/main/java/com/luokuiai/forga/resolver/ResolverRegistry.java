@@ -3,11 +3,10 @@ package com.luokuiai.forga.resolver;
 import com.luokuiai.forga.core.model.AttributeRef;
 import com.luokuiai.forga.core.model.RelationRef;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 
 /**
  * Immutable registry of resolver declarations.
@@ -15,6 +14,12 @@ import java.util.stream.Collectors;
 public final class ResolverRegistry {
 
   private final Map<String, RelationshipResolver> byName;
+
+  private final Map<RelationRef, RelationshipResolver> forward;
+
+  private final Map<RelationRef, RelationshipResolver> reverse;
+
+  private final Map<AttributeRef, RelationshipResolver> attributes;
 
   /**
    * Creates a resolver registry.
@@ -24,10 +29,35 @@ public final class ResolverRegistry {
   public ResolverRegistry(List<? extends RelationshipResolver> resolvers) {
     List<RelationshipResolver> copy = List.copyOf(resolvers);
     ensureUniqueNames(copy);
-    byName =
-        copy.stream()
-            .collect(Collectors.toUnmodifiableMap(
-                resolver -> resolver.descriptor().name(), Function.identity()));
+    Map<String, RelationshipResolver> names = new LinkedHashMap<>();
+    Map<RelationRef, RelationshipResolver> forwardCapabilities = new LinkedHashMap<>();
+    Map<RelationRef, RelationshipResolver> reverseCapabilities = new LinkedHashMap<>();
+    Map<AttributeRef, RelationshipResolver> attributeCapabilities = new LinkedHashMap<>();
+    for (RelationshipResolver resolver : copy) {
+      names.put(resolver.descriptor().name(), resolver);
+      resolver
+          .descriptor()
+          .forwardRelations()
+          .forEach(
+              relation ->
+                  register("forward relation", relation, resolver, forwardCapabilities));
+      resolver
+          .descriptor()
+          .reverseRelations()
+          .forEach(
+              relation ->
+                  register("reverse relation", relation, resolver, reverseCapabilities));
+      resolver
+          .descriptor()
+          .attributes()
+          .forEach(
+              attribute ->
+                  register("attribute", attribute, resolver, attributeCapabilities));
+    }
+    byName = Map.copyOf(names);
+    forward = Map.copyOf(forwardCapabilities);
+    reverse = Map.copyOf(reverseCapabilities);
+    attributes = Map.copyOf(attributeCapabilities);
   }
 
   /**
@@ -46,9 +76,7 @@ public final class ResolverRegistry {
    * @return matching resolver
    */
   public Optional<RelationshipResolver> findForward(RelationRef relation) {
-    return byName.values().stream()
-        .filter(resolver -> resolver.descriptor().supportsForward(relation))
-        .findFirst();
+    return Optional.ofNullable(forward.get(relation));
   }
 
   /**
@@ -58,9 +86,7 @@ public final class ResolverRegistry {
    * @return matching resolver
    */
   public Optional<RelationshipResolver> findReverse(RelationRef relation) {
-    return byName.values().stream()
-        .filter(resolver -> resolver.descriptor().supportsReverse(relation))
-        .findFirst();
+    return Optional.ofNullable(reverse.get(relation));
   }
 
   /**
@@ -70,9 +96,7 @@ public final class ResolverRegistry {
    * @return matching resolver
    */
   public Optional<RelationshipResolver> findAttribute(AttributeRef attribute) {
-    return byName.values().stream()
-        .filter(resolver -> resolver.descriptor().supportsAttribute(attribute))
-        .findFirst();
+    return Optional.ofNullable(attributes.get(attribute));
   }
 
   private static void ensureUniqueNames(List<RelationshipResolver> resolvers) {
@@ -83,6 +107,25 @@ public final class ResolverRegistry {
         throw new IllegalArgumentException("duplicate resolver name: " + name);
       }
       names.add(name);
+    }
+  }
+
+  private static <T> void register(
+      String capability,
+      T reference,
+      RelationshipResolver resolver,
+      Map<T, RelationshipResolver> registrations) {
+    RelationshipResolver existing = registrations.putIfAbsent(reference, resolver);
+    if (existing != null) {
+      throw new IllegalArgumentException(
+          "duplicate "
+              + capability
+              + " capability: "
+              + reference
+              + " declared by "
+              + existing.descriptor().name()
+              + " and "
+              + resolver.descriptor().name());
     }
   }
 }

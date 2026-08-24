@@ -172,7 +172,7 @@ class ForgaEvaluatorAutoConfigurationTest {
 
     @Bean
     RelationshipResolver relationshipResolver() {
-      return new TestResolver(Set.of(VIEWER), Set.of(VIEWER));
+      return new TestResolver(Set.of(VIEWER), Set.of());
     }
   }
 

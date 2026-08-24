@@ -5,11 +5,13 @@ import com.luokuiai.forga.core.eval.RelationshipEntry;
 import com.luokuiai.forga.core.eval.RelationshipLookup;
 import com.luokuiai.forga.core.eval.RelationshipLookupException;
 import java.util.ArrayList;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 
 /** Adapts registered forward relationship resolvers to evaluator lookups. */
 public final class ResolverRegistryRelationshipLookup implements RelationshipLookup {
@@ -28,6 +30,12 @@ public final class ResolverRegistryRelationshipLookup implements RelationshipLoo
   @Override
   public Map<RelationLookupRequest, List<RelationshipEntry>> resolve(
       List<RelationLookupRequest> requests) {
+    return resolve(requests, Optional.empty());
+  }
+
+  @Override
+  public Map<RelationLookupRequest, List<RelationshipEntry>> resolve(
+      List<RelationLookupRequest> requests, Optional<Instant> deadline) {
     List<RelationLookupRequest> unique = uniqueRequests(requests);
     if (unique.isEmpty()) {
       return Map.of();
@@ -48,7 +56,7 @@ public final class ResolverRegistryRelationshipLookup implements RelationshipLoo
     grouped.forEach(
         (resolver, groupedRequests) ->
             ResolverLookupSupport.batches(groupedRequests)
-                .forEach(batch -> resolveBatch(resolver, batch, resolved)));
+                .forEach(batch -> resolveBatch(resolver, batch, deadline, resolved)));
     return Map.copyOf(resolved);
   }
 
@@ -60,12 +68,17 @@ public final class ResolverRegistryRelationshipLookup implements RelationshipLoo
   private static void resolveBatch(
       RelationshipResolver resolver,
       List<RelationLookupRequest> requests,
+      Optional<Instant> deadline,
       Map<RelationLookupRequest, List<RelationshipEntry>> resolved) {
     Map<ForwardRelationshipRequest, RelationLookupRequest> submitted = new LinkedHashMap<>();
     for (RelationLookupRequest request : requests) {
       ForwardRelationshipRequest resolverRequest =
           new ForwardRelationshipRequest(
-              request.object(), request.relation(), ResolverBounds.MAX_LIMIT);
+              request.object(),
+              request.relation(),
+              ResolverBounds.MAX_LIMIT,
+              new ResolverContext(
+                  ConsistencyContext.empty(), deadline.map(ResolverDeadline::new)));
       submitted.put(resolverRequest, request);
     }
 

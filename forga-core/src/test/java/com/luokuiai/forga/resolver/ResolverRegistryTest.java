@@ -41,6 +41,47 @@ class ResolverRegistryTest {
   }
 
   @Test
+  void rejectsDuplicateCapabilityOwnership() {
+    RelationRef viewer = new RelationRef("viewer");
+    AttributeRef status = new AttributeRef("status");
+    StubResolver first =
+        new StubResolver(
+            new ResolverDescriptor(
+                "first", Set.of(viewer), Set.of(viewer), Set.of(status)));
+
+    assertThatIllegalArgumentException()
+        .isThrownBy(
+            () ->
+                new ResolverRegistry(
+                    List.of(
+                        first,
+                        new StubResolver(
+                            new ResolverDescriptor(
+                                "second", Set.of(viewer), Set.of(), Set.of())))))
+        .withMessageContainingAll("forward relation", "first", "second");
+    assertThatIllegalArgumentException()
+        .isThrownBy(
+            () ->
+                new ResolverRegistry(
+                    List.of(
+                        first,
+                        new StubResolver(
+                            new ResolverDescriptor(
+                                "second", Set.of(), Set.of(viewer), Set.of())))))
+        .withMessageContainingAll("reverse relation", "first", "second");
+    assertThatIllegalArgumentException()
+        .isThrownBy(
+            () ->
+                new ResolverRegistry(
+                    List.of(
+                        first,
+                        new StubResolver(
+                            new ResolverDescriptor(
+                                "second", Set.of(), Set.of(), Set.of(status))))))
+        .withMessageContainingAll("attribute", "first", "second");
+  }
+
+  @Test
   void copiesDescriptorCollections() {
     Set<RelationRef> forward = new java.util.HashSet<>(Set.of(new RelationRef("viewer")));
 

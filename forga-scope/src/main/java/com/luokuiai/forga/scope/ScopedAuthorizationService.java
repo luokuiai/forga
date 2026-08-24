@@ -22,36 +22,6 @@ public final class ScopedAuthorizationService {
   private final CrossScopeAccessResolver crossScopeAccessResolver;
 
   /**
-   * Creates a scoped authorization service using the default scope entry permission.
-   *
-   * <p>This compatibility constructor does not bind protected objects to the active scope. New
-   * scope-isolated integrations should use a constructor accepting {@link ObjectScopeResolver}.
-   *
-   * @param evaluator evaluator used for underlying authorization checks
-   */
-  public ScopedAuthorizationService(AuthorizationEvaluator evaluator) {
-    this(evaluator, ScopePolicyTemplates.ENTER);
-  }
-
-  /**
-   * Creates a scoped authorization service.
-   *
-   * <p>This compatibility constructor does not bind protected objects to the active scope. New
-   * scope-isolated integrations should use a constructor accepting {@link ObjectScopeResolver}.
-   *
-   * @param evaluator evaluator used for underlying authorization checks
-   * @param scopeEntryPermission permission required on the active scope before object checks
-   */
-  public ScopedAuthorizationService(
-      AuthorizationEvaluator evaluator, PermissionRef scopeEntryPermission) {
-    this.evaluator = Objects.requireNonNull(evaluator, "evaluator is required");
-    this.scopeEntryPermission =
-        Objects.requireNonNull(scopeEntryPermission, "scope entry permission is required");
-    this.objectScopeResolver = null;
-    this.crossScopeAccessResolver = CrossScopeAccessResolver.denyAll();
-  }
-
-  /**
    * Creates a strict scoped authorization service that denies cross-scope access.
    *
    * @param evaluator evaluator used for underlying authorization checks
@@ -61,6 +31,21 @@ public final class ScopedAuthorizationService {
   public static ScopedAuthorizationService strict(
       AuthorizationEvaluator evaluator, ObjectScopeResolver objectScopeResolver) {
     return new ScopedAuthorizationService(
+        evaluator,
+        ScopePolicyTemplates.ENTER,
+        objectScopeResolver,
+        CrossScopeAccessResolver.denyAll());
+  }
+
+  /**
+   * Creates a scoped authorization service that denies cross-scope access.
+   *
+   * @param evaluator evaluator used for underlying authorization checks
+   * @param objectScopeResolver host resolver for object ownership
+   */
+  public ScopedAuthorizationService(
+      AuthorizationEvaluator evaluator, ObjectScopeResolver objectScopeResolver) {
+    this(
         evaluator,
         ScopePolicyTemplates.ENTER,
         objectScopeResolver,
@@ -161,9 +146,6 @@ public final class ScopedAuthorizationService {
 
   private Optional<DecisionReason> boundaryFailure(
       ScopedPermissionRequest request, ScopeRef activeScope) {
-    if (objectScopeResolver == null) {
-      return Optional.empty();
-    }
     Optional<ScopeRef> resolvedObjectScope;
     try {
       resolvedObjectScope = objectScopeResolver.resolve(request.object());

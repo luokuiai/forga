@@ -1,7 +1,6 @@
 package com.luokuiai.forga.mybatis;
 
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -43,11 +42,6 @@ public final class MyBatisConstraintApplicator {
       return translator.translateAuthorizedList(
           original, authorizationBoundary.authorizedList().orElseThrow());
     }
-    MyBatisBoundConstraint constraint =
-        translator.translate(authorizationBoundary.predicate().orElseThrow());
-    String separator =
-        original.toLowerCase(Locale.ROOT).contains(" where ") ? " AND " : " WHERE ";
-    return new MyBatisBoundSql(
-        original + separator + "(" + constraint.sql() + ")", constraint.parameters());
+    return translator.apply(original, authorizationBoundary.predicate().orElseThrow());
   }
 }

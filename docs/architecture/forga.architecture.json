@@ -1,0 +1,255 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Forga Architecture",
+    "subtitle": "Embedded authorization SDK with host-owned identity, data, and relationships",
+    "animation": "none",
+    "viewBox": [1200, 760]
+  },
+  "components": [
+    {
+      "id": "auth_frameworks",
+      "type": "security",
+      "label": "Auth Frameworks",
+      "sublabel": "Spring Security / Sa-Token",
+      "pos": [30, 105],
+      "size": [150, 66]
+    },
+    {
+      "id": "host_app",
+      "type": "external",
+      "label": "Host Application",
+      "sublabel": "controllers + services",
+      "pos": [30, 315],
+      "size": [150, 66],
+      "tag": "owns business semantics"
+    },
+    {
+      "id": "auth_adapters",
+      "type": "security",
+      "label": "Auth Adapters",
+      "sublabel": "spring-security / sa-token",
+      "pos": [260, 105],
+      "size": [160, 66]
+    },
+    {
+      "id": "starter",
+      "type": "cloud",
+      "label": "Spring Boot Starter",
+      "sublabel": "opt-in auto-assembly",
+      "pos": [260, 315],
+      "size": [160, 66],
+      "tag": "@EnableForga"
+    },
+    {
+      "id": "spring_web",
+      "type": "frontend",
+      "label": "Spring Web",
+      "sublabel": "endpoint permissions",
+      "pos": [500, 105],
+      "size": [160, 66]
+    },
+    {
+      "id": "core",
+      "type": "backend",
+      "label": "Forga Core",
+      "sublabel": "policy + bounded evaluator",
+      "pos": [500, 315],
+      "size": [160, 66],
+      "tag": "RBAC + ReBAC + ABAC"
+    },
+    {
+      "id": "scope",
+      "type": "security",
+      "label": "Scope",
+      "sublabel": "acting context + switching",
+      "pos": [500, 515],
+      "size": [160, 66]
+    },
+    {
+      "id": "resolver_contracts",
+      "type": "backend",
+      "label": "Resolver Contracts",
+      "sublabel": "forward + reverse + batch",
+      "pos": [740, 205],
+      "size": [160, 66]
+    },
+    {
+      "id": "query",
+      "type": "messagebus",
+      "label": "Typed Query Model",
+      "sublabel": "constraints + rowsets",
+      "pos": [740, 405],
+      "size": [160, 66]
+    },
+    {
+      "id": "mybatis",
+      "type": "backend",
+      "label": "MyBatis Integration",
+      "sublabel": "safe SQL translation",
+      "pos": [740, 515],
+      "size": [160, 66]
+    },
+    {
+      "id": "host_resolvers",
+      "type": "external",
+      "label": "Host Resolvers",
+      "sublabel": "relationship implementations",
+      "pos": [990, 205],
+      "size": [170, 66]
+    },
+    {
+      "id": "host_data",
+      "type": "database",
+      "label": "Business Data",
+      "sublabel": "tables / cache / services",
+      "pos": [990, 405],
+      "size": [170, 66],
+      "tag": "host-owned schema"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Host composition root",
+      "wraps": ["auth_frameworks", "host_app"]
+    },
+    {
+      "kind": "security-group",
+      "label": "Forga SDK modules",
+      "wraps": [
+        "auth_adapters",
+        "starter",
+        "spring_web",
+        "core",
+        "scope",
+        "resolver_contracts",
+        "query",
+        "mybatis"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Host data boundary",
+      "wraps": ["host_resolvers", "host_data"]
+    }
+  ],
+  "connections": [
+    {
+      "from": "auth_frameworks",
+      "to": "auth_adapters",
+      "label": "identity",
+      "variant": "security"
+    },
+    {
+      "from": "auth_adapters",
+      "to": "starter",
+      "label": "SubjectRef",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [340, 185]
+    },
+    {
+      "from": "host_app",
+      "to": "starter",
+      "label": "beans + policy",
+      "variant": "emphasis"
+    },
+    {
+      "from": "starter",
+      "to": "core",
+      "label": "assemble",
+      "variant": "emphasis"
+    },
+    {
+      "from": "spring_web",
+      "to": "core",
+      "label": "permission check",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [580, 185]
+    },
+    {
+      "from": "scope",
+      "to": "core",
+      "label": "active scope",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "from": "core",
+      "to": "resolver_contracts",
+      "label": "bounded lookup",
+      "variant": "emphasis"
+    },
+    {
+      "from": "resolver_contracts",
+      "to": "host_resolvers",
+      "label": "SPI",
+      "variant": "emphasis"
+    },
+    {
+      "from": "host_resolvers",
+      "to": "host_data",
+      "label": "read",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [1075, 285]
+    },
+    {
+      "from": "core",
+      "to": "query",
+      "label": "authorization context",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "orthogonal-h",
+      "labelAt": [700, 395]
+    },
+    {
+      "from": "query",
+      "to": "mybatis",
+      "label": "typed constraint",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [820, 485]
+    },
+    {
+      "from": "mybatis",
+      "to": "host_data",
+      "label": "parameterized SQL",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "route": "orthogonal-h"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Core decision engine",
+      "items": [
+        "Neutral policy model for RBAC, ReBAC, and ABAC",
+        "Fail-closed evaluation with depth, call, result, and deadline bounds"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Set-based authorization",
+      "items": [
+        "Reverse resolvers power object listing",
+        "Typed constraints keep filtering, sorting, and pagination in SQL"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Ownership boundary",
+      "items": [
+        "Hosts own identity selection, relationships, and business schemas",
+        "Forga owns authorization evaluation and integration contracts"
+      ]
+    }
+  ]
+}

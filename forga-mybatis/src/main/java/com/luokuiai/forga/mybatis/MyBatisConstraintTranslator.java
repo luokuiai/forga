@@ -16,11 +16,24 @@ import com.luokuiai.forga.query.QueryParameter;
 import com.luokuiai.forga.query.QueryProjection;
 import com.luokuiai.forga.query.QueryResource;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.stream.Collectors;
+import net.sf.jsqlparser.JSQLParserException;
+import net.sf.jsqlparser.expression.Alias;
+import net.sf.jsqlparser.expression.Expression;
+import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
+import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
+import net.sf.jsqlparser.parser.CCJSqlParserUtil;
+import net.sf.jsqlparser.schema.Column;
+import net.sf.jsqlparser.schema.Table;
+import net.sf.jsqlparser.statement.Statement;
+import net.sf.jsqlparser.statement.select.Join;
+import net.sf.jsqlparser.statement.select.OrderByElement;
+import net.sf.jsqlparser.statement.select.PlainSelect;
+import net.sf.jsqlparser.statement.select.SelectItem;
 
 /**
  * Translates typed constraints into one parameterized MyBatis SQL predicate fragment.
@@ -50,6 +63,14 @@ public final class MyBatisConstraintTranslator {
     return new MyBatisBoundConstraint(sql, parameters);
   }
 
+  MyBatisBoundSql apply(String sql, QueryConstraint constraint) {
+    Objects.requireNonNull(constraint, "constraint is required");
+    MyBatisBoundConstraint translated = translate(constraint);
+    ParsedSelect parsed = parseSelect(sql, translated.parameters());
+    addWhere(parsed.select(), parsed.expression(translated.sql()));
+    return new MyBatisBoundSql(parsed.sql(), translated.parameters());
+  }
+
   /**
    * Translates and applies a set-based authorized list query to a SELECT statement.
    *
@@ -59,16 +80,14 @@ public final class MyBatisConstraintTranslator {
    */
   public MyBatisBoundSql translateAuthorizedList(String sql, AuthorizedListQuery query) {
     Objects.requireNonNull(query, "query is required");
-    String original = Objects.requireNonNull(sql, "sql is required").trim();
-    if (original.isBlank()) {
-      throw new IllegalArgumentException("sql is required");
-    }
     List<QueryParameter> parameters = new ArrayList<>();
-    String selectSql = addProjections(original, query.projections());
-    String joinedSql = addJoin(selectSql, query);
-    String filteredSql = addWhere(joinedSql, translateConstraint(query.where(), parameters));
-    String orderedSql = addOrderings(filteredSql, query.orderings());
-    return new MyBatisBoundSql(orderedSql, parameters);
+    String where = translateConstraint(query.where(), parameters);
+    ParsedSelect parsed = parseSelect(sql, parameters);
+    addProjections(parsed.select(), query.projections());
+    addJoin(parsed.select(), query, parsed);
+    addWhere(parsed.select(), parsed.expression(where));
+    addOrderings(parsed.select(), query.orderings());
+    return new MyBatisBoundSql(parsed.sql(), parameters);
   }
 
   private String translateConstraint(
@@ -87,6 +106,9 @@ public final class MyBatisConstraintTranslator {
 
   private String translatePredicate(
       PredicateConstraint predicate, List<QueryParameter> parameters) {
+    if (predicate.operator() == PredicateOperator.IN) {
+      throw new MyBatisTranslationException("IN requires a typed collection operand");
+    }
     return column(predicate.left())
         + " "
         + operator(predicate.operator())
@@ -131,64 +153,55 @@ public final class MyBatisConstraintTranslator {
     return column(correlation.outer()) + " = " + column(correlation.inner());
   }
 
-  private String addProjections(String sql, List<QueryProjection> projections) {
-    if (projections.isEmpty()) {
-      return sql;
-    }
-    int fromIndex = keywordIndex(sql, " from ");
-    if (fromIndex < 0 || !sql.regionMatches(true, 0, "select ", 0, 7)) {
-      throw new MyBatisTranslationException("authorized list query requires SELECT ... FROM");
-    }
-    String projectionSql =
-        projections.stream()
-            .map(projection -> column(projection.field()) + " AS " + projection.alias())
-            .collect(Collectors.joining(", "));
-    return sql.substring(0, fromIndex) + ", " + projectionSql + sql.substring(fromIndex);
+  private void addProjections(PlainSelect select, List<QueryProjection> projections) {
+    projections.forEach(
+        projection ->
+            select.addSelectItems(
+                new SelectItem<>(
+                    new Column(column(projection.field())), new Alias(projection.alias(), true))));
   }
 
-  private String addJoin(String sql, AuthorizedListQuery query) {
+  private void addJoin(PlainSelect select, AuthorizedListQuery query, ParsedSelect parsed) {
     String joinSql =
         query.join().correlations().stream()
             .map(this::translateCorrelation)
             .collect(Collectors.joining(" AND "));
     MyBatisResourceMapping rowset = mapping(query.join().rowset().resource());
-    int insertionIndex =
-        firstClauseIndex(sql, List.of(" where ", " order by ", " limit ", " offset "));
-    String suffix = insertionIndex < 0 ? "" : sql.substring(insertionIndex);
-    String prefix = insertionIndex < 0 ? sql : sql.substring(0, insertionIndex);
-    return prefix + " JOIN " + rowset.tableReference() + " ON " + joinSql + suffix;
+    Join join = new Join();
+    join.setInner(true);
+    join.setRightItem(new Table(rowset.tableReference()));
+    join.addOnExpression(parsed.expression(joinSql));
+    select.addJoins(join);
   }
 
-  private String addWhere(String sql, String where) {
-    int orderIndex = firstClauseIndex(sql, List.of(" order by ", " limit ", " offset "));
-    String suffix = orderIndex < 0 ? "" : sql.substring(orderIndex);
-    String prefix = orderIndex < 0 ? sql : sql.substring(0, orderIndex);
-    String separator = prefix.toLowerCase(Locale.ROOT).contains(" where ") ? " AND " : " WHERE ";
-    return prefix + separator + "(" + where + ")" + suffix;
+  private static void addWhere(PlainSelect select, Expression authorization) {
+    Expression protectedAuthorization = new ParenthesedExpressionList<>(authorization);
+    if (select.getWhere() == null) {
+      select.setWhere(protectedAuthorization);
+      return;
+    }
+    select.setWhere(
+        new AndExpression(
+            new ParenthesedExpressionList<>(select.getWhere()), protectedAuthorization));
   }
 
-  private String addOrderings(String sql, List<QueryOrdering> orderings) {
+  private void addOrderings(PlainSelect select, List<QueryOrdering> orderings) {
     if (orderings.isEmpty()) {
-      return sql;
+      return;
     }
-    String orderingSql =
-        orderings.stream()
-            .map(ordering -> column(ordering.field()) + " " + ordering.direction().name())
-            .collect(Collectors.joining(", "));
-    int orderIndex = keywordIndex(sql, " order by ");
-    int limitIndex = firstClauseIndex(sql, List.of(" limit ", " offset "));
-    if (orderIndex >= 0) {
-      String prefix = sql.substring(0, orderIndex + " order by ".length());
-      String existing =
-          limitIndex < 0
-              ? sql.substring(orderIndex + " order by ".length())
-              : sql.substring(orderIndex + " order by ".length(), limitIndex);
-      String suffix = limitIndex < 0 ? "" : sql.substring(limitIndex);
-      return prefix + orderingSql + ", " + existing.strip() + suffix;
+    List<OrderByElement> combined = new ArrayList<>();
+    orderings.forEach(
+        ordering -> {
+          OrderByElement element = new OrderByElement();
+          element.setExpression(new Column(column(ordering.field())));
+          element.setAsc(ordering.direction() == com.luokuiai.forga.query.QuerySortDirection.ASC);
+          element.setAscDescPresent(true);
+          combined.add(element);
+        });
+    if (select.getOrderByElements() != null) {
+      combined.addAll(select.getOrderByElements());
     }
-    String suffix = limitIndex < 0 ? "" : sql.substring(limitIndex);
-    String prefix = limitIndex < 0 ? sql : sql.substring(0, limitIndex);
-    return prefix + " ORDER BY " + orderingSql + suffix;
+    select.setOrderByElements(combined);
   }
 
   private String operand(QueryOperand operand, List<QueryParameter> parameters) {
@@ -214,27 +227,66 @@ public final class MyBatisConstraintTranslator {
     return mapping;
   }
 
-  private static int firstClauseIndex(String sql, List<String> clauses) {
-    return clauses.stream()
-        .mapToInt(clause -> keywordIndex(sql, clause))
-        .filter(index -> index >= 0)
-        .min()
-        .orElse(-1);
+  private static ParsedSelect parseSelect(String sql, List<QueryParameter> parameters) {
+    String original = Objects.requireNonNull(sql, "sql is required").trim();
+    if (original.isBlank()) {
+      throw new IllegalArgumentException("sql is required");
+    }
+    try {
+      Statement statement = CCJSqlParserUtil.parse(original);
+      if (!(statement instanceof PlainSelect plainSelect)) {
+        throw new MyBatisTranslationException("authorization requires one plain SELECT statement");
+      }
+      return new ParsedSelect(plainSelect, parameterTokens(parameters));
+    } catch (JSQLParserException exception) {
+      throw new MyBatisTranslationException("failed to parse SELECT statement", exception);
+    }
   }
 
-  private static int keywordIndex(String sql, String keyword) {
-    return sql.toLowerCase(Locale.ROOT).indexOf(keyword);
+  private static Map<String, String> parameterTokens(List<QueryParameter> parameters) {
+    Map<String, String> tokens = new LinkedHashMap<>();
+    for (QueryParameter parameter : parameters) {
+      tokens.computeIfAbsent(
+          parameter.name(), ignored -> ":forga_parameter_" + tokens.size());
+    }
+    return tokens;
   }
 
   private static String operator(PredicateOperator operator) {
     return switch (operator) {
       case EQUALS -> "=";
       case NOT_EQUALS -> "<>";
-      case IN -> "IN";
+      case IN -> throw new MyBatisTranslationException("IN requires a typed collection operand");
       case GREATER_THAN -> ">";
       case GREATER_THAN_OR_EQUALS -> ">=";
       case LESS_THAN -> "<";
       case LESS_THAN_OR_EQUALS -> "<=";
     };
+  }
+
+  private record ParsedSelect(PlainSelect select, Map<String, String> parameterTokens) {
+
+    private Expression expression(String sql) {
+      String parsable = sql;
+      for (Map.Entry<String, String> token : parameterTokens.entrySet()) {
+        parsable =
+            parsable.replace("#{forga.parameters." + token.getKey() + "}", token.getValue());
+      }
+      try {
+        return CCJSqlParserUtil.parseCondExpression(parsable);
+      } catch (JSQLParserException exception) {
+        throw new MyBatisTranslationException(
+            "failed to parse authorization expression", exception);
+      }
+    }
+
+    private String sql() {
+      String rendered = select.toString();
+      for (Map.Entry<String, String> token : parameterTokens.entrySet()) {
+        rendered =
+            rendered.replace(token.getValue(), "#{forga.parameters." + token.getKey() + "}");
+      }
+      return rendered;
+    }
   }
 }
