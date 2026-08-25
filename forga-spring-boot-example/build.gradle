@@ -1,0 +1,15 @@
+plugins {
+  id 'application'
+  id 'org.springframework.boot' version '3.5.16'
+}
+
+dependencies {
+  implementation project(':forga-spring-boot-starter')
+  implementation project(':forga-mybatis')
+  implementation "org.springframework.boot:spring-boot-starter-web:${springBootVersion}"
+  testImplementation "org.springframework.boot:spring-boot-starter-test:${springBootVersion}"
+}
+
+application {
+  mainClass = 'com.luokuiai.forga.example.ForgaSpringBootExampleApplication'
+}

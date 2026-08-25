@@ -63,6 +63,9 @@ public final class PolicyCompiler {
       validate(caveatExpression.expression(), capabilities);
       return;
     }
+    if (expression instanceof GrantExpression) {
+      return;
+    }
     throw new PolicyValidationException("unknown expression type");
   }
 
@@ -126,6 +129,9 @@ public final class PolicyCompiler {
           + ","
           + caveatExpression.caveat().name()
           + ")";
+    }
+    if (expression instanceof GrantExpression) {
+      return "grant()";
     }
     throw new PolicyValidationException("unknown expression type");
   }

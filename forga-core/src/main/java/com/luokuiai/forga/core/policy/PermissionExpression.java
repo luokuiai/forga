@@ -14,7 +14,17 @@ public sealed interface PermissionExpression
         IntersectionExpression,
         ExclusionExpression,
         TraversalExpression,
-        CaveatExpression {
+        CaveatExpression,
+        GrantExpression {
+
+  /**
+   * Creates a host-resolved effective permission grant expression.
+   *
+   * @return grant expression
+   */
+  static GrantExpression grant() {
+    return new GrantExpression();
+  }
 
   /**
    * Creates an expression that checks direct relation membership.

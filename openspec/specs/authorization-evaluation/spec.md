@@ -31,14 +31,18 @@ meeting, todo, appointment, proxy, mapped, or borrowed concepts.
 - **AND** host-domain semantics MUST remain outside standalone Forga APIs and core models
 
 ### Requirement: Composable permission evaluation
-The engine MUST evaluate direct relations, subject sets, union, intersection, exclusion, relation
-traversal, and caveats from one immutable policy model. An allowed decision proof MUST contain only
-steps belonging to a successful expression path.
+The engine MUST evaluate direct relations, subject sets, dynamic grants, union, intersection,
+exclusion, relation traversal, and caveats from one immutable policy model. An allowed decision proof
+MUST contain only steps belonging to a successful expression path.
 
 #### Scenario: Permission traverses a parent relation
 - **WHEN** a permission grants access through a parent object relation and the subject is related to
   that parent
 - **THEN** `check` returns an allowed decision with only the successful traversed proof
+
+#### Scenario: Dynamic grant allows access
+- **WHEN** a host grant lookup reports that the requested subject holds the requested permission
+- **THEN** a grant expression returns an allowed decision without enumerating other subjects
 
 #### Scenario: Failed union branch precedes an allowed branch
 - **WHEN** an earlier union branch records relationship steps but fails and a later branch succeeds
@@ -50,11 +54,11 @@ steps belonging to a successful expression path.
 
 ### Requirement: Consistent single and bulk checks
 `check` and `bulkCheck` MUST produce equivalent decisions for identical inputs. `bulkCheck` MUST
-group distinct relationship requests at each graph frontier into bounded resolver batches,
+group distinct relationship and grant requests at each graph frontier into bounded resolver batches,
 including frontiers discovered through subject sets and traversal, instead of issuing one resolver
-query per object. Each bulk decision MUST own independent visited-node, logical resolver-call,
-intermediate-result, cycle, proof, failure, and timeout state; bulk requests MAY share only
-operation-local immutable resolver results used to avoid duplicate physical lookups.
+query per object or grant. Each bulk decision MUST own independent visited-node, logical
+resolver-call, intermediate-result, cycle, proof, failure, and timeout state; bulk requests MAY share
+only operation-local immutable resolver results used to avoid duplicate physical lookups.
 
 #### Scenario: Batch matches individual checks
 - **WHEN** the same checks are evaluated individually and in one batch under the same context
@@ -63,6 +67,10 @@ operation-local immutable resolver results used to avoid duplicate physical look
 #### Scenario: Distinct objects share a frontier
 - **WHEN** a bulk check evaluates one relation on multiple distinct objects
 - **THEN** the resolver receives those relationship requests in one bounded batch
+
+#### Scenario: Distinct grants share a batch
+- **WHEN** a bulk check evaluates dynamic grants for multiple distinct requests
+- **THEN** the grant lookup receives those requests in bounded batches
 
 #### Scenario: Traversal discovers another frontier
 - **WHEN** a batched traversal resolves multiple intermediate subject-set objects
@@ -73,9 +81,10 @@ operation-local immutable resolver results used to avoid duplicate physical look
 - **THEN** evaluating them in one batch does not consume another decision's limits or deadline
 
 #### Scenario: Prefetch does not bypass logical resolver limits
-- **WHEN** one check requires more distinct relationship lookups than its resolver-call limit
+- **WHEN** one check requires more distinct relationship or grant lookups than its resolver-call
+  limit
 - **THEN** the bulk decision fails with the same limit reason as an individual check even if all
-  relationship results were physically prefetched
+  results were physically prefetched
 
 ### Requirement: Bounded fail-closed evaluation
 The evaluator MUST enforce configured depth, visited-node, resolver-call, intermediate-result,

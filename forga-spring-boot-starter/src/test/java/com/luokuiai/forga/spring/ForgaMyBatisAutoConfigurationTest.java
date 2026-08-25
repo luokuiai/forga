@@ -6,6 +6,7 @@ import com.luokuiai.forga.core.context.AuthenticatedSubjectProvider;
 import com.luokuiai.forga.core.context.AuthorizationAttributesProvider;
 import com.luokuiai.forga.mybatis.ForgaMyBatisInterceptor;
 import com.luokuiai.forga.mybatis.MyBatisAuthorizationBoundary;
+import com.luokuiai.forga.mybatis.MyBatisAuthorizationBoundaryResolver;
 import com.luokuiai.forga.mybatis.MyBatisResourceMapping;
 import com.luokuiai.forga.mybatis.MyBatisStatementAuthorization;
 import com.luokuiai.forga.mybatis.MyBatisStatementRegistry;
@@ -60,6 +61,28 @@ class ForgaMyBatisAutoConfigurationTest {
               assertThat(context.getBean(MyBatisStatementRegistry.class).find("Mapper.select"))
                   .containsSame(statement);
               assertThat(context).hasSingleBean(ForgaMyBatisInterceptor.class);
+            });
+  }
+
+  @Test
+  void acceptsHostDynamicBoundaryResolver() {
+    MyBatisAuthorizationBoundaryResolver resolver =
+        (statementId, declared, subject, attributes) -> statement(statementId).boundary();
+    contextRunner
+        .withBean(MyBatisAuthorizationBoundaryResolver.class, () -> resolver)
+        .withBean(
+            MyBatisStatementAuthorization.class,
+            () ->
+                new MyBatisStatementAuthorization(
+                    "Mapper.dynamic", MyBatisAuthorizationBoundary.dynamic("resource-view")))
+        .withBean(MyBatisResourceMapping.class, ForgaMyBatisAutoConfigurationTest::mapping)
+        .run(
+            context -> {
+              assertThat(context).hasNotFailed();
+              assertThat(context.getBean(MyBatisAuthorizationBoundaryResolver.class))
+                  .isSameAs(resolver);
+              assertThat(context.getBean(MyBatisStatementRegistry.class).find("Mapper.dynamic"))
+                  .isPresent();
             });
   }
 

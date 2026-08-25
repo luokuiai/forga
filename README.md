@@ -131,6 +131,24 @@ CheckDecision decision =
 policy. Unknown permissions, resolver failures, cycle detection, limit exhaustion, and consistency
 conflicts fail closed.
 
+`check()` is for one independently identified object. **Do not query a collection and call
+`check()` once per row**: every call has independent evaluation state and can turn host grant or
+relationship lookups into N+1 queries. For a bounded set of already identified objects, submit one
+`bulkCheck()` call so Forga can batch lookups and share request-scoped memoization:
+
+```java
+List<CheckDecision> decisions =
+    evaluator.bulkCheck(
+        documents.stream()
+            .map(document -> new CheckRequest(document.ref(), view, currentSubject))
+            .toList());
+```
+
+`bulkCheck()` prevents the SDK from issuing one lookup per decision, but host implementations must
+also resolve each submitted batch with set-oriented repository queries rather than looping and
+querying once per request. For normal paginated business lists, use a MyBatis query constraint or
+authorized rowset instead of either form of per-row authorization.
+
 ## Host Resolvers
 
 Applications expose existing authorization data through resolver contracts. A resolver can read
@@ -162,9 +180,76 @@ ObjectListingLookup objectListingLookup =
 Forward resolution powers `check` and `bulkCheck`. Reverse resolution powers `listObjects`.
 Hosts supply request attributes to caveat evaluation and MyBatis query mappings through the
 corresponding provider contracts. The evaluator does not perform implicit attribute lookups.
+Resolvers that declare only forward capabilities implement only `descriptor()` and
+`resolveForward()`; undeclared reverse and attribute operations have complete empty defaults.
 
 Forga does not require a Forga-owned relationship table. Hosts may store relationships in their own
 schema, derive them from business tables, or resolve them from external services.
+
+### Batch Lookup Contract
+
+`PermissionGrantLookup` and every `RelationshipResolver` operation receive batches so host adapters
+can avoid N+1 queries. A correct database-backed implementation should:
+
+1. Read one request-consistent snapshot or cache version for the batch.
+2. Extract the distinct tenant, subject, object, relation, attribute, and permission keys needed by
+   that batch.
+3. Load matching rows with one or a fixed number of set-oriented `IN`, join, or repository batch
+   queries.
+4. Group the loaded rows in memory and return exactly one result for every submitted request.
+
+Do not hide per-request database access inside the batch callback:
+
+```java
+// Wrong: one repository query for every request.
+for (CheckRequest request : requests) {
+  results.put(request, repository.findOne(request));
+}
+```
+
+The SDK validates response completeness and limits batch sizes, but it cannot inspect how many SQL
+statements a host repository executes. Adapter tests should therefore count repository calls and
+assert that query count remains fixed as batch size grows.
+
+## Dynamic Permission Grants
+
+Subject-centric RBAC systems can keep permission expressions fixed while resolving effective role
+grants from a host-owned snapshot. Use `grant()` instead of converting a permission snapshot into a
+list of every authorized user:
+
+```java
+CompiledPolicy policy =
+    PolicyCompiler.compile(
+        new PolicyDefinition(Map.of(view, PermissionExpression.grant())),
+        ResolverCapabilities.of(List.of(), List.of()));
+
+PermissionGrantLookup grants =
+    requests ->
+        requests.stream()
+            .collect(Collectors.toUnmodifiableMap(
+                request -> request,
+                request -> new PermissionGrantResult(
+                    hostSnapshots.resolve(request.subject())
+                        .contains(request.permission()))));
+```
+
+The lookup receives complete subject, object, permission, and request attributes in bounded batches.
+It can reuse a versioned host cache and return an opaque `ConsistencyToken`. Role assignments,
+permission tables, snapshot invalidation, and cache storage remain host-owned. A grant leaf can be
+combined with relations and caveats, for example `grant() OR relation(owner)`. Grant leaves are
+check-only; object listing still requires reverse relationship resolution or a set-oriented query.
+
+This keeps two different kinds of configuration separate:
+
+- Permission expressions are the stable authorization model compiled into `CompiledPolicy`.
+- Role assignments, role-permission grants, data-scope grants, relationships, and attributes are
+  dynamic host authorization data read during checks or query-boundary resolution.
+
+Changing host authorization data does not require rebuilding `CompiledPolicy`. For ABAC-style data
+scopes, resolve the effective host grant once per query and translate it to an allowlisted,
+parameterized `QueryConstraint` through `MyBatisAuthorizationBoundaryResolver`.
+The runnable example uses `OWNER`, `DEPARTMENT`, and `TENANT`; even tenant-wide access becomes an
+explicit `tenant_id` predicate rather than an unconstrained query.
 
 ## Object Listing
 
@@ -183,6 +268,13 @@ ListObjectsResponse response =
 This is not a table scan plus per-row `check`. The host resolver must provide reverse lookup pages.
 Objects that are not discoverable from reverse relationships are outside graph listing. For normal
 business list pages, use query constraints instead.
+
+`listObjects()` may materialize relation unions, intersections, and traversal results before
+returning a page. `pageSize` limits the response page, not every intermediate relation set; the
+evaluator bounds those sets with `maxIntermediateResults` and fails closed when the limit is
+exceeded. Use graph listing only for bounded relationship discovery. Large or routinely paginated
+business datasets should push authorization into SQL through a query constraint or authorized
+rowset instead of increasing the intermediate-result limit.
 
 Listing cursors are opaque and bound to the request identity, policy fingerprint, consistency
 context, and resolver continuation state. Reusing a cursor with different request inputs fails
@@ -455,6 +547,23 @@ Important integration behavior:
 - Missing subject or unsupported configured SQL fails closed.
 - Only allowlisted fields are translated into SQL.
 
+For effective data scopes that change by subject, declare a dynamic boundary and resolve one
+concrete typed constraint per query:
+
+```java
+MyBatisStatementAuthorization statement =
+    new MyBatisStatementAuthorization(
+        "MeetingMapper.selectPage",
+        MyBatisAuthorizationBoundary.dynamic("meeting-list"));
+
+MyBatisAuthorizationBoundaryResolver boundaries =
+    (statementId, declared, subject, attributes) ->
+        hostDataScopes.constraint(declared.id(), subject, attributes);
+```
+
+The resolver must return a concrete boundary with the same id. Null, unresolved, or raw-SQL results
+fail before database execution. Fixed boundaries continue to work without a resolver.
+
 `forga-spring-boot-starter` assembles optional runtime components and MyBatis integration when
 enabled. Applications still provide host-specific resolvers, authorization attributes, active-scope
 providers, and statement mappings.
@@ -473,13 +582,78 @@ public class Application {
 }
 ```
 
-An enabled Spring application provides one `CompiledPolicy` Bean and its
-`RelationshipResolver` Beans. The Starter automatically assembles:
+An enabled Spring application can start before its authorization model is ready. Without a
+`CompiledPolicy` Bean, the Starter logs a warning and does not create an
+`AuthorizationEvaluator`; unrelated application endpoints continue to use their existing behavior.
+This state is deliberately not represented by an allow-all evaluator. Any component that explicitly
+requires an `AuthorizationEvaluator` still fails Spring dependency validation.
+
+When the host provides one `CompiledPolicy` Bean and its `RelationshipResolver` Beans, the Starter
+automatically assembles:
 
 - `ResolverRegistry`
 - `RelationshipLookup` and `ObjectListingLookup`
 - `EvaluationLimits.defaults()`
 - `AuthorizationEvaluator`
+
+`PolicyDefinition` contains the host's permission expressions. `PolicyCompiler` validates those
+expressions against declared resolver capabilities and produces the runtime-ready `CompiledPolicy`.
+Because the policy and relationship data are business-owned, the Starter cannot invent these beans.
+An application may keep `@EnableForga` during incremental integration and add the policy later, or
+omit `@EnableForga` to disable all Forga runtime components.
+
+`CompiledPolicy` is currently an immutable startup snapshot of permission expressions. Dynamic
+role grants, data-scope grants, relationships, and attributes do not require recompiling it: host
+lookup and boundary resolver Beans read that business-owned data at evaluation time. Replacing the
+permission expression model itself at runtime is not yet supported and requires an application
+restart with a newly compiled policy.
+
+### Runnable Spring Boot Example
+
+[`forga-spring-boot-example`](forga-spring-boot-example/) is a complete, tested application showing:
+
+- `@EnableForga` on the application composition root
+- a `CompiledPolicy` Bean defining `view_document = viewer OR grant()`
+- a forward-only `RelationshipResolver` Bean using the undeclared operation defaults
+- a persistence-shaped, mutable host store for role assignments, permission grants, and data scopes
+- a batched `PermissionGrantLookup` reading one immutable host snapshot per invocation
+- a `MyBatisAuthorizationBoundaryResolver` translating effective data scopes to typed constraints
+- distinct tenant-scoped `user` and `membership` subjects for concurrent appointments
+- a dynamic `appointed` relationship plus current-department validation for `DEPARTMENT` scope
+- request providers reading subject type, subject id, effective tenant, and current department headers
+- a controller mapping `/documents/{id}` to an authorization `ObjectRef`
+
+Run it from the repository root:
+
+```bash
+./gradlew :forga-spring-boot-example:bootRun
+```
+
+The example grants `alice` access to `document:doc-1` through a relationship and grants `carol`
+`view_document` through mutable role authorization data:
+
+```bash
+curl -i -H 'X-Subject-Id: alice' http://localhost:8080/documents/doc-1
+curl -i -H 'X-Subject-Id: carol' \
+  -H 'X-Effective-Tenant-Id: tenant-home' \
+  http://localhost:8080/documents/doc-2
+curl -i -H 'X-Subject-Type: membership' \
+  -H 'X-Subject-Id: carol-target' \
+  -H 'X-Effective-Tenant-Id: tenant-target' \
+  -H 'X-Department-Id: department-a' \
+  http://localhost:8080/documents/doc-2
+curl -i -H 'X-Subject-Id: bob' http://localhost:8080/documents/doc-1
+```
+
+The membership request uses only roles granted to `membership:carol-target` in `tenant-target`.
+It does not inherit `user:carol` roles from `tenant-home`. The same host snapshot also owns two
+active department appointments; selecting an unrelated or deactivated department makes the
+department boundary fail closed.
+
+The header provider is intentionally limited to the example. Production applications should use
+the Sa-Token adapter, Spring Security adapter, or a host authentication integration.
+The example store is intentionally in-memory so it runs without infrastructure; production hosts
+adapt the same lookup boundaries to their own repositories and cache invalidation strategy.
 
 Each default uses `@ConditionalOnMissingBean`, so hosts can replace individual lookups, limits, or
 the evaluator. A host `CaveatEvaluator` Bean is applied automatically when present. Spring Web

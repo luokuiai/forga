@@ -15,4 +15,14 @@ public final class MyBatisAuthorizationException extends RuntimeException {
   public MyBatisAuthorizationException(String message) {
     super(message);
   }
+
+  /**
+   * Creates an authorization exception with its cause.
+   *
+   * @param message failure message
+   * @param cause underlying failure
+   */
+  public MyBatisAuthorizationException(String message, Throwable cause) {
+    super(message, cause);
+  }
 }

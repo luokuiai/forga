@@ -4,6 +4,7 @@ import com.luokuiai.forga.core.eval.AuthorizationEvaluator;
 import com.luokuiai.forga.core.eval.CaveatEvaluator;
 import com.luokuiai.forga.core.eval.EvaluationLimits;
 import com.luokuiai.forga.core.eval.ObjectListingLookup;
+import com.luokuiai.forga.core.eval.PermissionGrantLookup;
 import com.luokuiai.forga.core.eval.RelationshipLookup;
 import com.luokuiai.forga.core.policy.CompiledPolicy;
 import com.luokuiai.forga.resolver.RelationshipResolver;
@@ -11,8 +12,12 @@ import com.luokuiai.forga.resolver.ResolverRegistry;
 import com.luokuiai.forga.resolver.ResolverRegistryObjectListingLookup;
 import com.luokuiai.forga.resolver.ResolverRegistryRelationshipLookup;
 import java.util.List;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 
@@ -20,6 +25,8 @@ import org.springframework.context.annotation.Bean;
 @AutoConfiguration
 @ConditionalOnForgaEnabled
 public class ForgaEvaluatorAutoConfiguration {
+
+  private static final Log LOGGER = LogFactory.getLog(ForgaEvaluatorAutoConfiguration.class);
 
   /**
    * Registers host relationship resolvers.
@@ -77,9 +84,11 @@ public class ForgaEvaluatorAutoConfiguration {
    * @param objectListings reverse object listing lookup
    * @param limits evaluation limits
    * @param caveats optional caveat evaluator
+   * @param grants optional host effective permission grant lookup
    * @return authorization evaluator
    */
   @Bean
+  @ConditionalOnBean(CompiledPolicy.class)
   @ConditionalOnMissingBean
   public AuthorizationEvaluator forgaAuthorizationEvaluator(
       CompiledPolicy policy,
@@ -87,12 +96,35 @@ public class ForgaEvaluatorAutoConfiguration {
       RelationshipLookup relationships,
       ObjectListingLookup objectListings,
       EvaluationLimits limits,
-      ObjectProvider<CaveatEvaluator> caveats) {
+      ObjectProvider<CaveatEvaluator> caveats,
+      ObjectProvider<PermissionGrantLookup> grants) {
     ForgaResolverValidator.validateForwardCapabilities(policy, resolvers);
     CaveatEvaluator caveatEvaluator = caveats.getIfAvailable();
-    return caveatEvaluator == null
-        ? new AuthorizationEvaluator(policy, relationships, objectListings, limits)
-        : new AuthorizationEvaluator(
-            policy, relationships, objectListings, limits, caveatEvaluator);
+    PermissionGrantLookup grantLookup = grants.getIfAvailable();
+    if (grantLookup == null && ForgaResolverValidator.requiresGrantLookup(policy)) {
+      throw new ForgaRuntimeException(
+          "policy contains grant() but no PermissionGrantLookup bean is registered");
+    }
+    return new AuthorizationEvaluator(
+        policy,
+        relationships,
+        objectListings,
+        limits,
+        caveatEvaluator == null ? (caveat, request) -> false : caveatEvaluator,
+        grantLookup == null ? PermissionGrantLookup.denyAll() : grantLookup);
+  }
+
+  /**
+   * Reports that evaluator-based authorization is inactive until a policy is configured.
+   *
+   * @return startup warning callback
+   */
+  @Bean
+  @ConditionalOnMissingBean({CompiledPolicy.class, AuthorizationEvaluator.class})
+  public SmartInitializingSingleton forgaMissingPolicyWarning() {
+    return () ->
+        LOGGER.warn(
+            "Forga is enabled without a CompiledPolicy; AuthorizationEvaluator was not assembled "
+                + "and evaluator-based authorization is inactive");
   }
 }
