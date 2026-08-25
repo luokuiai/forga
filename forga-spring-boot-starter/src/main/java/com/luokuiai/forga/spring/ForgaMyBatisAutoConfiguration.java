@@ -3,6 +3,7 @@ package com.luokuiai.forga.spring;
 import com.luokuiai.forga.core.context.AuthenticatedSubjectProvider;
 import com.luokuiai.forga.core.context.AuthorizationAttributesProvider;
 import com.luokuiai.forga.mybatis.ForgaMyBatisInterceptor;
+import com.luokuiai.forga.mybatis.MyBatisAuthorizationBoundaryResolver;
 import com.luokuiai.forga.mybatis.MyBatisResourceMapping;
 import com.luokuiai.forga.mybatis.MyBatisStatementAuthorization;
 import com.luokuiai.forga.mybatis.MyBatisStatementRegistry;
@@ -55,6 +56,7 @@ public class ForgaMyBatisAutoConfiguration {
    * @param subjects discovered subject providers
    * @param attributes request attributes provider
    * @param mappings declared MyBatis resource mappings
+   * @param boundaries optional request-time boundary resolver
    * @return MyBatis interceptor
    */
   @Bean
@@ -63,11 +65,13 @@ public class ForgaMyBatisAutoConfiguration {
       MyBatisStatementRegistry statements,
       ObjectProvider<AuthenticatedSubjectProvider> subjects,
       AuthorizationAttributesProvider attributes,
-      ObjectProvider<MyBatisResourceMapping> mappings) {
+      ObjectProvider<MyBatisResourceMapping> mappings,
+      ObjectProvider<MyBatisAuthorizationBoundaryResolver> boundaries) {
     return ForgaMyBatisAutoConfigurationSupport.assemble(
             statements,
             ForgaAuthenticationProviders.requireOne(subjects),
             attributes,
+            boundaries.getIfAvailable(MyBatisAuthorizationBoundaryResolver::declared),
             resourceMappings(mappings))
         .interceptor();
   }

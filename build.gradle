@@ -21,10 +21,14 @@ allprojects {
 }
 
 subprojects {
+  def publishableProject = !project.name.endsWith('-example')
+
   apply plugin: 'java-library'
   apply plugin: 'checkstyle'
-  apply plugin: 'maven-publish'
-  apply plugin: 'com.vanniktech.maven.publish.base'
+  if (publishableProject) {
+    apply plugin: 'maven-publish'
+    apply plugin: 'com.vanniktech.maven.publish.base'
+  }
 
   java {
     toolchain {
@@ -58,41 +62,43 @@ subprojects {
     configFile = rootProject.file('gradle/checkstyle/checkstyle.xml')
   }
 
-  publishing {
-    publications {
-      mavenJava(MavenPublication) {
-        from components.java
-        suppressPomMetadataWarningsFor('testFixturesApiElements')
-        suppressPomMetadataWarningsFor('testFixturesRuntimeElements')
+  if (publishableProject) {
+    publishing {
+      publications {
+        mavenJava(MavenPublication) {
+          from components.java
+          suppressPomMetadataWarningsFor('testFixturesApiElements')
+          suppressPomMetadataWarningsFor('testFixturesRuntimeElements')
 
-        pom {
-          name = project.name
-          description = "Forga authorization SDK module ${project.name}"
-          url = 'https://github.com/luokuiai/forga'
-          licenses {
-            license {
-              name = 'The Apache License, Version 2.0'
-              url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
-            }
-          }
-          developers {
-            developer {
-              id = 'luokuiai'
-              name = 'Luokuiai'
-            }
-          }
-          scm {
-            connection = 'scm:git:git://github.com/luokuiai/forga.git'
-            developerConnection = 'scm:git:ssh://git@github.com/luokuiai/forga.git'
+          pom {
+            name = project.name
+            description = "Forga authorization SDK module ${project.name}"
             url = 'https://github.com/luokuiai/forga'
+            licenses {
+              license {
+                name = 'The Apache License, Version 2.0'
+                url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+              }
+            }
+            developers {
+              developer {
+                id = 'luokuiai'
+                name = 'Luokuiai'
+              }
+            }
+            scm {
+              connection = 'scm:git:git://github.com/luokuiai/forga.git'
+              developerConnection = 'scm:git:ssh://git@github.com/luokuiai/forga.git'
+              url = 'https://github.com/luokuiai/forga'
+            }
           }
         }
       }
     }
-  }
 
-  mavenPublishing {
-    publishToMavenCentral()
-    signAllPublications()
+    mavenPublishing {
+      publishToMavenCentral()
+      signAllPublications()
+    }
   }
 }

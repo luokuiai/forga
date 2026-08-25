@@ -8,6 +8,7 @@ import com.luokuiai.forga.core.model.ConsistencyToken;
 import com.luokuiai.forga.core.policy.CaveatExpression;
 import com.luokuiai.forga.core.policy.CompiledPolicy;
 import com.luokuiai.forga.core.policy.ExclusionExpression;
+import com.luokuiai.forga.core.policy.GrantExpression;
 import com.luokuiai.forga.core.policy.IntersectionExpression;
 import com.luokuiai.forga.core.policy.PermissionExpression;
 import com.luokuiai.forga.core.policy.RelationExpression;
@@ -44,6 +45,8 @@ public final class AuthorizationEvaluator {
   private final EvaluationLimits limits;
 
   private final CaveatEvaluator caveats;
+
+  private final PermissionGrantLookup grants;
 
   private final ListingCursorCodec cursorCodec;
 
@@ -106,16 +109,48 @@ public final class AuthorizationEvaluator {
       ObjectListingLookup objectListings,
       EvaluationLimits limits,
       CaveatEvaluator caveats) {
+    this(
+        policy,
+        relationships,
+        objectListings,
+        limits,
+        caveats,
+        PermissionGrantLookup.denyAll());
+  }
+
+  /**
+   * Creates an evaluator with object listing and dynamic grant support.
+   *
+   * @param policy compiled policy
+   * @param relationships relationship lookup
+   * @param objectListings reverse object listing lookup
+   * @param limits evaluation limits
+   * @param caveats caveat evaluator
+   * @param grants host-owned effective permission grant lookup
+   */
+  public AuthorizationEvaluator(
+      CompiledPolicy policy,
+      RelationshipLookup relationships,
+      ObjectListingLookup objectListings,
+      EvaluationLimits limits,
+      CaveatEvaluator caveats,
+      PermissionGrantLookup grants) {
     this.policy = Objects.requireNonNull(policy, "policy is required");
     this.relationships = Objects.requireNonNull(relationships, "relationships is required");
     this.objectListings = objectListings;
     this.limits = Objects.requireNonNull(limits, "limits are required");
     this.caveats = Objects.requireNonNull(caveats, "caveats are required");
+    this.grants = Objects.requireNonNull(grants, "grants are required");
     this.cursorCodec = new ListingCursorCodec();
   }
 
   /**
    * Evaluates one check request.
+   *
+   * <p>This method is intended for one independently identified object. Do not call it once per
+   * row of a collection; each invocation has independent lookup state and can produce N+1 host
+   * queries. Use {@link #bulkCheck(List)} for a bounded batch, or a set-oriented query constraint
+   * for business list pages.
    *
    * @param request check request
    * @return decision
@@ -128,6 +163,10 @@ public final class AuthorizationEvaluator {
   /**
    * Evaluates a batch of check requests with shared request-scoped memoization.
    *
+   * <p>Prefer this method when several already identified objects require decisions. Host grant
+   * and relationship implementations should resolve submitted batches with set-oriented lookups
+   * instead of querying once per request.
+   *
    * @param requests check requests
    * @return decisions in request order
    */
@@ -139,9 +178,18 @@ public final class AuthorizationEvaluator {
           .toList();
     }
     Map<RelationLookupRequest, List<RelationshipEntry>> sharedCache = new HashMap<>();
-    prefetchBulk(immutableRequests, new EvaluationState(sharedCache));
+    Map<CheckRequest, PermissionGrantResult> sharedGrantCache = new HashMap<>();
+    Map<CheckRequest, DecisionReason> sharedGrantFailures = new HashMap<>();
+    prefetchBulk(
+        immutableRequests,
+        new EvaluationState(sharedCache, sharedGrantCache, sharedGrantFailures));
     return immutableRequests.stream()
-        .map(request -> check(request, new EvaluationState(sharedCache)))
+        .map(
+            request ->
+                check(
+                    request,
+                    new EvaluationState(
+                        sharedCache, sharedGrantCache, sharedGrantFailures)))
         .toList();
   }
 
@@ -228,11 +276,19 @@ public final class AuthorizationEvaluator {
     Set<BulkWork> visited = new HashSet<>();
     while (!frontier.isEmpty()) {
       Map<RelationLookupRequest, List<BulkContinuation>> continuations = new LinkedHashMap<>();
+      Set<CheckRequest> grantRequests = new LinkedHashSet<>();
       ArrayDeque<BulkWork> pending = new ArrayDeque<>(frontier);
       while (!pending.isEmpty()) {
-        expandBulkWork(pending.removeFirst(), pending, continuations, visited);
+        expandBulkWork(
+            pending.removeFirst(), pending, continuations, grantRequests, visited);
       }
-      if (continuations.isEmpty() || !prefetchFrontier(continuations.keySet(), state)) {
+      if (!prefetchGrants(grantRequests, state)) {
+        return;
+      }
+      if (continuations.isEmpty()) {
+        return;
+      }
+      if (!prefetchFrontier(continuations.keySet(), state)) {
         return;
       }
       frontier = nextBulkFrontier(continuations, state);
@@ -243,6 +299,7 @@ public final class AuthorizationEvaluator {
       BulkWork work,
       ArrayDeque<BulkWork> pending,
       Map<RelationLookupRequest, List<BulkContinuation>> continuations,
+      Set<CheckRequest> grantRequests,
       Set<BulkWork> visited) {
     if (!visited.add(work)) {
       return;
@@ -253,6 +310,8 @@ public final class AuthorizationEvaluator {
           continuations,
           new RelationLookupRequest(work.object(), relationExpression.relation()),
           new BulkContinuation(work.request(), Optional.empty()));
+    } else if (expression instanceof GrantExpression) {
+      grantRequests.add(grantRequest(work.request(), work.object(), work.request().subject()));
     } else if (expression instanceof UnionExpression unionExpression) {
       unionExpression.expressions().stream()
           .map(child -> new BulkWork(work.request(), work.object(), child))
@@ -277,6 +336,47 @@ public final class AuthorizationEvaluator {
       pending.addLast(
           new BulkWork(work.request(), work.object(), caveatExpression.expression()));
     }
+  }
+
+  private boolean prefetchGrants(Set<CheckRequest> requests, EvaluationState state) {
+    List<CheckRequest> missing =
+        requests.stream()
+            .filter(request -> !state.grantCache.containsKey(request))
+            .filter(request -> !state.grantFailures.containsKey(request))
+            .toList();
+    if (missing.isEmpty()) {
+      return true;
+    }
+    Map<CheckRequest, PermissionGrantResult> resolved;
+    try {
+      resolved = grants.resolve(missing, state.deadline);
+    } catch (RelationshipLookupException exception) {
+      recordGrantFailure(missing, state, exception.reason());
+      return false;
+    } catch (RuntimeException exception) {
+      recordGrantFailure(missing, state, DecisionReason.RESOLVER_FAILURE);
+      return false;
+    }
+    if (!completeGrantBatch(missing, resolved)) {
+      recordGrantFailure(missing, state, DecisionReason.RESOLVER_FAILURE);
+      return false;
+    }
+    resolved.forEach(state.grantCache::put);
+    return true;
+  }
+
+  private static boolean completeGrantBatch(
+      List<CheckRequest> requests, Map<CheckRequest, PermissionGrantResult> resolved) {
+    return resolved != null
+        && resolved.size() == requests.size()
+        && resolved.keySet().equals(Set.copyOf(requests))
+        && resolved.values().stream().allMatch(Objects::nonNull);
+  }
+
+  private static void recordGrantFailure(
+      List<CheckRequest> requests, EvaluationState state, DecisionReason reason) {
+    requests.forEach(request -> state.grantFailures.put(request, reason));
+    state.deniedReason = reason;
   }
 
   private static void addBulkContinuation(
@@ -358,6 +458,9 @@ public final class AuthorizationEvaluator {
     if (expression instanceof RelationExpression relationExpression) {
       return matchesRelation(object, relationExpression.relation(), subject, state, depth);
     }
+    if (expression instanceof GrantExpression) {
+      return resolveGrant(grantRequest(request, object, subject), state);
+    }
     if (expression instanceof UnionExpression unionExpression) {
       for (PermissionExpression branch : unionExpression.expressions()) {
         int checkpoint = state.proof.size();
@@ -401,6 +504,42 @@ public final class AuthorizationEvaluator {
           && evaluate(caveatExpression.expression(), request, object, subject, state, depth + 1);
     }
     return false;
+  }
+
+  private boolean resolveGrant(CheckRequest request, EvaluationState state) {
+    if (!state.allowGrantCall(request)) {
+      return false;
+    }
+    DecisionReason cachedFailure = state.grantFailures.get(request);
+    if (cachedFailure != null) {
+      state.deniedReason = cachedFailure;
+      return false;
+    }
+    PermissionGrantResult result = state.grantCache.get(request);
+    if (result == null) {
+      Map<CheckRequest, PermissionGrantResult> resolved;
+      try {
+        resolved = grants.resolve(List.of(request), state.deadline);
+      } catch (RelationshipLookupException exception) {
+        state.deniedReason = exception.reason();
+        return false;
+      } catch (RuntimeException exception) {
+        state.deniedReason = DecisionReason.RESOLVER_FAILURE;
+        return false;
+      }
+      if (!completeGrantBatch(List.of(request), resolved)) {
+        state.deniedReason = DecisionReason.RESOLVER_FAILURE;
+        return false;
+      }
+      result = resolved.get(request);
+      state.grantCache.put(request, result);
+    }
+    return state.acceptConsistency(result.consistency()) && result.granted();
+  }
+
+  private static CheckRequest grantRequest(
+      CheckRequest request, ObjectRef object, SubjectRef subject) {
+    return new CheckRequest(object, request.permission(), subject, request.attributes());
   }
 
   private boolean traverse(
@@ -832,7 +971,13 @@ public final class AuthorizationEvaluator {
 
     private final Map<RelationLookupRequest, List<RelationshipEntry>> cache;
 
+    private final Map<CheckRequest, PermissionGrantResult> grantCache;
+
+    private final Map<CheckRequest, DecisionReason> grantFailures;
+
     private final Set<RelationLookupRequest> accountedLookups = new HashSet<>();
+
+    private final Set<CheckRequest> accountedGrants = new HashSet<>();
 
     private final Map<ReverseRelationLookupRequest, Set<ObjectRef>> reverseCache = new HashMap<>();
 
@@ -855,11 +1000,21 @@ public final class AuthorizationEvaluator {
     private DecisionReason deniedReason = DecisionReason.NO_MATCH;
 
     EvaluationState() {
-      this(new HashMap<>());
+      this(new HashMap<>(), new HashMap<>(), new HashMap<>());
     }
 
     EvaluationState(Map<RelationLookupRequest, List<RelationshipEntry>> cache) {
+      this(cache, new HashMap<>(), new HashMap<>());
+    }
+
+    EvaluationState(
+        Map<RelationLookupRequest, List<RelationshipEntry>> cache,
+        Map<CheckRequest, PermissionGrantResult> grantCache,
+        Map<CheckRequest, DecisionReason> grantFailures) {
       this.cache = Objects.requireNonNull(cache, "cache is required");
+      this.grantCache = Objects.requireNonNull(grantCache, "grant cache is required");
+      this.grantFailures =
+          Objects.requireNonNull(grantFailures, "grant failures are required");
       deadline = limits.timeout().map(timeout -> Instant.now().plus(timeout));
     }
 
@@ -913,6 +1068,17 @@ public final class AuthorizationEvaluator {
         return false;
       }
       accountedLookups.add(request);
+      return true;
+    }
+
+    boolean allowGrantCall(CheckRequest request) {
+      if (accountedGrants.contains(request)) {
+        return true;
+      }
+      if (!allowResolverCall()) {
+        return false;
+      }
+      accountedGrants.add(request);
       return true;
     }
 

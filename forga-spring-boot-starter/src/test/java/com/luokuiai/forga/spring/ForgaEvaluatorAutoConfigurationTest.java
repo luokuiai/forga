@@ -8,6 +8,8 @@ import com.luokuiai.forga.core.eval.CheckDecision;
 import com.luokuiai.forga.core.eval.CheckRequest;
 import com.luokuiai.forga.core.eval.EvaluationLimits;
 import com.luokuiai.forga.core.eval.ObjectListingLookup;
+import com.luokuiai.forga.core.eval.PermissionGrantLookup;
+import com.luokuiai.forga.core.eval.PermissionGrantResult;
 import com.luokuiai.forga.core.eval.RelationshipLookup;
 import com.luokuiai.forga.core.model.AttributeRef;
 import com.luokuiai.forga.core.model.CaveatRef;
@@ -32,9 +34,13 @@ import com.luokuiai.forga.resolver.ResolverRegistry;
 import com.luokuiai.forga.resolver.ReverseRelationshipBatchRequest;
 import com.luokuiai.forga.resolver.ReverseRelationshipBatchResponse;
 import com.luokuiai.forga.resolver.ReverseRelationshipResponse;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -100,15 +106,54 @@ class ForgaEvaluatorAutoConfigurationTest {
   }
 
   @Test
-  void missingPolicyFailsStartup() {
+  void missingPolicyStartsWithoutEvaluatorAndLogsWarning() {
+    List<String> messages = new ArrayList<>();
+    Logger logger = Logger.getLogger(ForgaEvaluatorAutoConfiguration.class.getName());
+    Handler handler = recordingHandler(messages);
+    logger.addHandler(handler);
+    try {
+      contextRunner
+          .withUserConfiguration(MissingPolicyConfiguration.class)
+          .run(
+              context -> {
+              assertThat(context).hasNotFailed();
+              assertThat(context).doesNotHaveBean(AuthorizationEvaluator.class);
+              assertThat(context).hasBean("forgaMissingPolicyWarning");
+            });
+    } finally {
+      logger.removeHandler(handler);
+    }
+    assertThat(messages)
+        .contains(
+            "Forga is enabled without a CompiledPolicy; AuthorizationEvaluator was not assembled "
+                + "and evaluator-based authorization is inactive");
+  }
+
+  @Test
+  void componentRequiringEvaluatorStillFailsWithoutPolicy() {
     contextRunner
-        .withUserConfiguration(MissingPolicyConfiguration.class)
+        .withUserConfiguration(MissingPolicyConsumerConfiguration.class)
         .run(
             context -> {
               assertThat(context).hasFailed();
               assertThat(context.getStartupFailure())
-                  .hasMessageContaining(CompiledPolicy.class.getName());
+                  .hasMessageContaining(AuthorizationEvaluator.class.getName());
             });
+  }
+
+  private static Handler recordingHandler(List<String> messages) {
+    return new Handler() {
+      @Override
+      public void publish(LogRecord record) {
+        messages.add(record.getMessage());
+      }
+
+      @Override
+      public void flush() { }
+
+      @Override
+      public void close() { }
+    };
   }
 
   @Test
@@ -124,6 +169,34 @@ class ForgaEvaluatorAutoConfigurationTest {
   }
 
   @Test
+  void grantPolicyUsesHostPermissionSnapshotLookup() {
+    contextRunner
+        .withUserConfiguration(GrantConfiguration.class)
+        .run(
+            context -> {
+              assertThat(context).hasNotFailed();
+              CheckDecision decision =
+                  context
+                      .getBean(AuthorizationEvaluator.class)
+                      .check(new CheckRequest(DOCUMENT, VIEW, ALICE));
+              assertThat(decision.allowed()).isTrue();
+            });
+  }
+
+  @Test
+  void grantPolicyWithoutLookupFailsStartup() {
+    contextRunner
+        .withUserConfiguration(MissingGrantConfiguration.class)
+        .run(
+            context -> {
+              assertThat(context).hasFailed();
+              assertThat(context.getStartupFailure())
+                  .hasRootCauseMessage(
+                      "policy contains grant() but no PermissionGrantLookup bean is registered");
+            });
+  }
+
+  @Test
   void hostEvaluatorOverrideBacksOffWithoutPolicy() {
     contextRunner
         .withUserConfiguration(OverrideConfiguration.class)
@@ -133,6 +206,7 @@ class ForgaEvaluatorAutoConfigurationTest {
               assertThat(context).hasSingleBean(AuthorizationEvaluator.class);
               assertThat(context.getBean(AuthorizationEvaluator.class))
                   .isSameAs(OverrideConfiguration.EVALUATOR);
+              assertThat(context).doesNotHaveBean("forgaMissingPolicyWarning");
             });
   }
 
@@ -202,6 +276,16 @@ class ForgaEvaluatorAutoConfigurationTest {
 
   @Configuration(proxyBeanMethods = false)
   @EnableForga
+  static class MissingPolicyConsumerConfiguration {
+
+    @Bean
+    String evaluatorConsumer(AuthorizationEvaluator evaluator) {
+      return evaluator.toString();
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  @EnableForga
   static class MissingCapabilityConfiguration {
 
     @Bean
@@ -212,6 +296,35 @@ class ForgaEvaluatorAutoConfigurationTest {
     @Bean
     RelationshipResolver relationshipResolver() {
       return new TestResolver(Set.of(), Set.of());
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  @EnableForga
+  static class GrantConfiguration {
+
+    @Bean
+    CompiledPolicy compiledPolicy() {
+      return policy(PermissionExpression.grant());
+    }
+
+    @Bean
+    PermissionGrantLookup permissionGrantLookup() {
+      return requests ->
+          requests.stream()
+              .collect(
+                  java.util.stream.Collectors.toUnmodifiableMap(
+                      request -> request, request -> new PermissionGrantResult(true)));
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  @EnableForga
+  static class MissingGrantConfiguration {
+
+    @Bean
+    CompiledPolicy compiledPolicy() {
+      return policy(PermissionExpression.grant());
     }
   }
 

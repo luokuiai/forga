@@ -38,6 +38,10 @@ public final class MyBatisConstraintApplicator {
       return new MyBatisBoundSql(original, List.of());
     }
     MyBatisAuthorizationBoundary authorizationBoundary = boundary.orElseThrow();
+    if (authorizationBoundary.isDynamic()) {
+      throw new MyBatisAuthorizationException(
+          "authorization boundary was not resolved: " + authorizationBoundary.id());
+    }
     if (authorizationBoundary.authorizedList().isPresent()) {
       return translator.translateAuthorizedList(
           original, authorizationBoundary.authorizedList().orElseThrow());

@@ -9,8 +9,8 @@ import java.util.Optional;
  * Declared integration boundary for applying one composed authorization constraint.
  *
  * @param id boundary id
- * @param constraint composed authorization constraint
- * @param listQuery set-based authorized list query
+ * @param constraint composed authorization constraint, or null for another boundary type
+ * @param listQuery set-based authorized list query, or null for another boundary type
  */
 public record MyBatisAuthorizationBoundary(
     String id, QueryConstraint constraint, AuthorizedListQuery listQuery) {
@@ -37,9 +37,19 @@ public record MyBatisAuthorizationBoundary(
       throw new IllegalArgumentException("id is required");
     }
     id = id.trim();
-    if ((constraint == null) == (listQuery == null)) {
-      throw new IllegalArgumentException("exactly one boundary type is required");
+    if (constraint != null && listQuery != null) {
+      throw new IllegalArgumentException("at most one boundary type is allowed");
     }
+  }
+
+  /**
+   * Creates a boundary whose typed constraint is resolved for each request.
+   *
+   * @param id boundary id
+   * @return dynamic authorization boundary
+   */
+  public static MyBatisAuthorizationBoundary dynamic(String id) {
+    return new MyBatisAuthorizationBoundary(id, null, null);
   }
 
   /**
@@ -70,5 +80,14 @@ public record MyBatisAuthorizationBoundary(
    */
   public Optional<AuthorizedListQuery> authorizedList() {
     return Optional.ofNullable(listQuery);
+  }
+
+  /**
+   * Returns whether this declaration requires request-time resolution.
+   *
+   * @return true when no concrete constraint is present
+   */
+  public boolean isDynamic() {
+    return constraint == null && listQuery == null;
   }
 }

@@ -4,6 +4,7 @@ import com.luokuiai.forga.core.model.RelationRef;
 import com.luokuiai.forga.core.policy.CaveatExpression;
 import com.luokuiai.forga.core.policy.CompiledPolicy;
 import com.luokuiai.forga.core.policy.ExclusionExpression;
+import com.luokuiai.forga.core.policy.GrantExpression;
 import com.luokuiai.forga.core.policy.IntersectionExpression;
 import com.luokuiai.forga.core.policy.PermissionExpression;
 import com.luokuiai.forga.core.policy.RelationExpression;
@@ -25,6 +26,11 @@ final class ForgaResolverValidator {
             "missing forward resolver for relation: " + relation.name());
       }
     }
+  }
+
+  static boolean requiresGrantLookup(CompiledPolicy policy) {
+    return policy.definition().permissions().values().stream()
+        .anyMatch(ForgaResolverValidator::containsGrant);
   }
 
   private static Set<RelationRef> relations(CompiledPolicy policy) {
@@ -50,5 +56,29 @@ final class ForgaResolverValidator {
     } else if (expression instanceof CaveatExpression caveatExpression) {
       collect(caveatExpression.expression(), relations);
     }
+  }
+
+  private static boolean containsGrant(PermissionExpression expression) {
+    if (expression instanceof GrantExpression) {
+      return true;
+    }
+    if (expression instanceof UnionExpression unionExpression) {
+      return unionExpression.expressions().stream().anyMatch(ForgaResolverValidator::containsGrant);
+    }
+    if (expression instanceof IntersectionExpression intersectionExpression) {
+      return intersectionExpression.expressions().stream()
+          .anyMatch(ForgaResolverValidator::containsGrant);
+    }
+    if (expression instanceof ExclusionExpression exclusionExpression) {
+      return containsGrant(exclusionExpression.base())
+          || containsGrant(exclusionExpression.excluded());
+    }
+    if (expression instanceof TraversalExpression traversalExpression) {
+      return containsGrant(traversalExpression.expression());
+    }
+    if (expression instanceof CaveatExpression caveatExpression) {
+      return containsGrant(caveatExpression.expression());
+    }
+    return false;
   }
 }
