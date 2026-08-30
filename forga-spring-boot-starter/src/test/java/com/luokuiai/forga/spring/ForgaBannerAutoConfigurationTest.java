@@ -20,10 +20,21 @@ class ForgaBannerAutoConfigurationTest {
         .run(
             context -> {
               assertThat(context).hasBean("forgaStartupBanner");
-              assertThat(ForgaStartupBanner.render())
+              String banner = ForgaStartupBanner.render();
+              assertThat(banner)
                   .contains("Forga")
                   .contains("Fine-grained Object-Relation Graph Authorization")
                   .contains("(v" + ForgaStartupBanner.version() + ")");
+              assertThat(banner.split("\\R"))
+                  .hasSize(10)
+                  .containsSequence(
+                      "    ______",
+                      "   |  ____|",
+                      "   | |__ ___  _ __ __ _  __ _",
+                      "   |  __/ _ \\| '__/ _` |/ _` |",
+                      "   | | | (_) | | | (_| | (_| |",
+                      "   |_|  \\___/|_|  \\__, |\\__,_|",
+                      "                   |___/");
               assertThat(ForgaStartupBanner.version()).isNotBlank().doesNotStartWith("${");
             });
   }
