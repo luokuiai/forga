@@ -44,9 +44,10 @@ public final class ResolverRegistryObjectListingLookup implements ObjectListingL
     if (unique.isEmpty()) {
       return Map.of();
     }
-    Map<RelationshipResolver, List<ReverseRelationLookupRequest>> grouped = new LinkedHashMap<>();
+    Map<ReverseRelationshipResolver, List<ReverseRelationLookupRequest>> grouped =
+        new LinkedHashMap<>();
     for (ReverseRelationLookupRequest request : unique) {
-      RelationshipResolver resolver =
+      ReverseRelationshipResolver resolver =
           resolvers
               .findReverse(request.relation())
               .orElseThrow(
@@ -71,7 +72,7 @@ public final class ResolverRegistryObjectListingLookup implements ObjectListingL
   }
 
   private static void resolveBatch(
-      RelationshipResolver resolver,
+      ReverseRelationshipResolver resolver,
       List<ReverseRelationLookupRequest> requests,
       Optional<Instant> deadline,
       Map<ReverseRelationLookupRequest, ObjectListingPage> resolved) {
@@ -99,17 +100,17 @@ public final class ResolverRegistryObjectListingLookup implements ObjectListingL
       throw exception;
     } catch (RuntimeException exception) {
       throw ResolverLookupSupport.failure(
-          "reverse resolver failed: " + resolver.descriptor().name());
+          "reverse resolver failed: " + resolver.name());
     }
     if (batchResponse == null || batchResponse.responses().size() != submitted.size()) {
       throw ResolverLookupSupport.failure(
-          "reverse resolver returned an incomplete batch: " + resolver.descriptor().name());
+          "reverse resolver returned an incomplete batch: " + resolver.name());
     }
     for (ReverseRelationshipResponse response : batchResponse.responses()) {
       ReverseRelationLookupRequest request = submitted.remove(response.request());
       if (request == null) {
         throw ResolverLookupSupport.failure(
-            "reverse resolver returned an unexpected response: " + resolver.descriptor().name());
+            "reverse resolver returned an unexpected response: " + resolver.name());
       }
       resolved.put(
           request,
@@ -120,7 +121,7 @@ public final class ResolverRegistryObjectListingLookup implements ObjectListingL
     }
     if (!submitted.isEmpty()) {
       throw ResolverLookupSupport.failure(
-          "reverse resolver omitted a response: " + resolver.descriptor().name());
+          "reverse resolver omitted a response: " + resolver.name());
     }
   }
 

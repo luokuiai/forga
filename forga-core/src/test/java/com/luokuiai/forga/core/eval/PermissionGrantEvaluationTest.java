@@ -12,12 +12,12 @@ import com.luokuiai.forga.core.policy.CompiledPolicy;
 import com.luokuiai.forga.core.policy.PermissionExpression;
 import com.luokuiai.forga.core.policy.PolicyCompiler;
 import com.luokuiai.forga.core.policy.PolicyDefinition;
-import com.luokuiai.forga.core.policy.ResolverCapabilities;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 class PermissionGrantEvaluationTest {
@@ -35,12 +35,13 @@ class PermissionGrantEvaluationTest {
   @Test
   void resolvesAllowedAndDeniedEffectiveGrants() {
     PermissionGrantLookup grants =
-        requests ->
-            requests.stream()
-                .collect(
-                    java.util.stream.Collectors.toUnmodifiableMap(
-                        request -> request,
-                        request -> new PermissionGrantResult(ALICE.equals(request.subject()))));
+        (requests, context) ->
+            BatchResolution.unversioned(
+                requests.stream()
+                    .collect(
+                        java.util.stream.Collectors.toUnmodifiableMap(
+                            request -> request,
+                            request -> ALICE.equals(request.subject()))));
     AuthorizationEvaluator evaluator =
         evaluator(policy(PermissionExpression.grant()), empty(), grants);
 
@@ -56,7 +57,9 @@ class PermissionGrantEvaluationTest {
   @Test
   void composesGrantWithRelationshipBranches() {
     RelationshipLookup relationships =
-        requests -> Map.of(new RelationLookupRequest(DOCUMENT, OWNER), List.of());
+        (requests, context) ->
+            BatchResolution.unversioned(
+                Map.of(new RelationLookupRequest(DOCUMENT, OWNER), List.of()));
     AuthorizationEvaluator evaluator =
         evaluator(
             policy(
@@ -65,7 +68,8 @@ class PermissionGrantEvaluationTest {
                         PermissionExpression.relation(OWNER),
                         PermissionExpression.grant()))),
             relationships,
-            requests -> Map.of(requests.get(0), new PermissionGrantResult(true)));
+            (requests, context) ->
+                BatchResolution.unversioned(Map.of(requests.get(0), true)));
 
     assertThat(evaluator.check(request(ALICE)).allowed()).isTrue();
   }
@@ -75,13 +79,14 @@ class PermissionGrantEvaluationTest {
     AtomicInteger calls = new AtomicInteger();
     List<Integer> batchSizes = new ArrayList<>();
     PermissionGrantLookup grants =
-        requests -> {
+        (requests, context) -> {
           calls.incrementAndGet();
           batchSizes.add(requests.size());
-          return requests.stream()
-              .collect(
-                  java.util.stream.Collectors.toUnmodifiableMap(
-                      request -> request, request -> new PermissionGrantResult(true)));
+          return BatchResolution.unversioned(
+              requests.stream()
+                  .collect(
+                      java.util.stream.Collectors.toUnmodifiableMap(
+                          request -> request, request -> true)));
         };
     AuthorizationEvaluator evaluator =
         evaluator(policy(PermissionExpression.grant()), empty(), grants);
@@ -98,12 +103,15 @@ class PermissionGrantEvaluationTest {
   @Test
   void malformedOrFailedGrantLookupFailsClosed() {
     AuthorizationEvaluator incomplete =
-        evaluator(policy(PermissionExpression.grant()), empty(), requests -> Map.of());
+        evaluator(
+            policy(PermissionExpression.grant()),
+            empty(),
+            (requests, context) -> BatchResolution.unversioned(Map.of()));
     AuthorizationEvaluator failed =
         evaluator(
             policy(PermissionExpression.grant()),
             empty(),
-            requests -> {
+            (requests, context) -> {
               throw new IllegalStateException("unavailable");
             });
 
@@ -117,10 +125,11 @@ class PermissionGrantEvaluationTest {
   void conflictingGrantConsistencyFailsClosed() {
     ObjectRef parent = new ObjectRef("folder", "one");
     RelationshipLookup relationships =
-        requests ->
-            Map.of(
-                new RelationLookupRequest(DOCUMENT, PARENT),
-                List.of(RelationshipEntry.subjectSet(new SubjectSetRef(parent, OWNER))));
+        (requests, context) ->
+            BatchResolution.unversioned(
+                Map.of(
+                    new RelationLookupRequest(DOCUMENT, PARENT),
+                    List.of(RelationshipEntry.subjectSet(new SubjectSetRef(parent, OWNER)))));
     CompiledPolicy policy =
         policy(
             PermissionExpression.intersection(
@@ -128,22 +137,76 @@ class PermissionGrantEvaluationTest {
                     PermissionExpression.grant(),
                     PermissionExpression.traversal(PARENT, PermissionExpression.grant()))));
     PermissionGrantLookup grants =
-        requests ->
-            requests.stream()
-                .collect(
-                    java.util.stream.Collectors.toUnmodifiableMap(
-                        request -> request,
-                        request ->
-                            new PermissionGrantResult(
-                                true,
-                                Optional.of(
-                                    new ConsistencyToken(
-                                        request.object().equals(DOCUMENT) ? "v1" : "v2")))));
+        (requests, context) ->
+            new BatchResolution<>(
+                requests.stream()
+                    .collect(
+                        java.util.stream.Collectors.toUnmodifiableMap(
+                            request -> request, request -> true)),
+                Optional.of(
+                    new ConsistencyToken(
+                        requests.get(0).object().equals(DOCUMENT) ? "v1" : "v2")));
 
     CheckDecision decision = evaluator(policy, relationships, grants).check(request(ALICE));
 
     assertThat(decision.allowed()).isFalse();
     assertThat(decision.reason()).isEqualTo(DecisionReason.CONSISTENCY_CONFLICT);
+  }
+
+  @Test
+  void relationshipConsistencyPropagatesToGrantLookup() {
+    ConsistencyToken token = new ConsistencyToken("v1");
+    AtomicReference<EvaluationReadContext> grantContext = new AtomicReference<>();
+    RelationshipLookup relationships =
+        (requests, context) ->
+            new BatchResolution<>(
+                Map.of(
+                    requests.get(0),
+                    List.of(RelationshipEntry.subject(ALICE))),
+                Optional.of(token));
+    PermissionGrantLookup grants =
+        (requests, context) -> {
+          grantContext.set(context);
+          return new BatchResolution<>(Map.of(requests.get(0), true), Optional.of(token));
+        };
+    CompiledPolicy policy =
+        policy(
+            PermissionExpression.intersection(
+                List.of(
+                    PermissionExpression.relation(OWNER),
+                    PermissionExpression.grant())));
+
+    CheckDecision decision = evaluator(policy, relationships, grants).check(request(ALICE));
+
+    assertThat(decision.allowed()).isTrue();
+    assertThat(grantContext.get().consistency()).contains(token);
+  }
+
+  @Test
+  void grantConsistencyPropagatesToRelationshipLookup() {
+    ConsistencyToken token = new ConsistencyToken("v1");
+    AtomicReference<EvaluationReadContext> relationshipContext = new AtomicReference<>();
+    PermissionGrantLookup grants =
+        (requests, context) ->
+            new BatchResolution<>(Map.of(requests.get(0), true), Optional.of(token));
+    RelationshipLookup relationships =
+        (requests, context) -> {
+          relationshipContext.set(context);
+          return new BatchResolution<>(
+              Map.of(requests.get(0), List.of(RelationshipEntry.subject(ALICE))),
+              Optional.of(token));
+        };
+    CompiledPolicy policy =
+        policy(
+            PermissionExpression.intersection(
+                List.of(
+                    PermissionExpression.grant(),
+                    PermissionExpression.relation(OWNER))));
+
+    CheckDecision decision = evaluator(policy, relationships, grants).check(request(ALICE));
+
+    assertThat(decision.allowed()).isTrue();
+    assertThat(relationshipContext.get().consistency()).contains(token);
   }
 
   @Test
@@ -162,16 +225,18 @@ class PermissionGrantEvaluationTest {
         relationships,
         null,
         EvaluationLimits.defaults(),
-        (caveat, request) -> false,
+        CaveatEvaluator.denyAll(),
+        AttributeLookup.unavailable(),
         grants);
   }
 
   private static RelationshipLookup empty() {
-    return requests ->
-        requests.stream()
-            .collect(
-                java.util.stream.Collectors.toUnmodifiableMap(
-                    request -> request, request -> List.of()));
+    return (requests, context) ->
+        BatchResolution.unversioned(
+            requests.stream()
+                .collect(
+                    java.util.stream.Collectors.toUnmodifiableMap(
+                        request -> request, request -> List.of())));
   }
 
   private static CheckRequest request(SubjectRef subject) {
@@ -179,8 +244,6 @@ class PermissionGrantEvaluationTest {
   }
 
   private static CompiledPolicy policy(PermissionExpression expression) {
-    return PolicyCompiler.compile(
-        new PolicyDefinition(Map.of(VIEW, expression)),
-        ResolverCapabilities.of(List.of(OWNER, PARENT), List.of()));
+    return PolicyCompiler.compile(new PolicyDefinition(Map.of(VIEW, expression)));
   }
 }

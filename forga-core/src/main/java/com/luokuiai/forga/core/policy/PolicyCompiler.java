@@ -19,68 +19,52 @@ public final class PolicyCompiler {
   }
 
   /**
-   * Compiles a policy after checking required resolver capabilities.
+   * Compiles an immutable policy definition.
+   *
+   * <p>Runtime resolver and caveat requirements are validated from the components registered with
+   * the evaluator integration rather than from a caller-maintained duplicate capability list.
    *
    * @param definition policy definition
-   * @param capabilities supported resolver capabilities
    * @return compiled policy
    */
-  public static CompiledPolicy compile(
-      PolicyDefinition definition, ResolverCapabilities capabilities) {
+  public static CompiledPolicy compile(PolicyDefinition definition) {
     Objects.requireNonNull(definition, "definition is required");
-    Objects.requireNonNull(capabilities, "capabilities are required");
-    definition.permissions()
-        .forEach((permission, expression) -> validate(expression, capabilities));
+    definition.permissions().values().forEach(PolicyCompiler::validate);
     return new CompiledPolicy(definition, fingerprint(definition));
   }
 
-  private static void validate(
-      PermissionExpression expression, ResolverCapabilities capabilities) {
+  private static void validate(PermissionExpression expression) {
     if (expression instanceof RelationExpression relationExpression) {
-      requireRelation(relationExpression.relation(), capabilities);
+      Objects.requireNonNull(relationExpression.relation(), "relation is required");
       return;
     }
     if (expression instanceof UnionExpression unionExpression) {
-      unionExpression.expressions().forEach(branch -> validate(branch, capabilities));
+      unionExpression.expressions().forEach(PolicyCompiler::validate);
       return;
     }
     if (expression instanceof IntersectionExpression intersectionExpression) {
-      intersectionExpression.expressions().forEach(branch -> validate(branch, capabilities));
+      intersectionExpression.expressions().forEach(PolicyCompiler::validate);
       return;
     }
     if (expression instanceof ExclusionExpression exclusionExpression) {
-      validate(exclusionExpression.base(), capabilities);
-      validate(exclusionExpression.excluded(), capabilities);
+      validate(exclusionExpression.base());
+      validate(exclusionExpression.excluded());
       return;
     }
     if (expression instanceof TraversalExpression traversalExpression) {
-      requireRelation(traversalExpression.relation(), capabilities);
-      validate(traversalExpression.expression(), capabilities);
+      Objects.requireNonNull(traversalExpression.relation(), "relation is required");
+      validate(traversalExpression.expression());
       return;
     }
     if (expression instanceof CaveatExpression caveatExpression) {
-      requireCaveat(caveatExpression.caveat(), capabilities);
-      validate(caveatExpression.expression(), capabilities);
+      Objects.requireNonNull(caveatExpression.caveat(), "caveat is required");
+      validate(caveatExpression.expression());
       return;
     }
     if (expression instanceof GrantExpression) {
       return;
     }
     throw new PolicyValidationException("unknown expression type");
-  }
-
-  private static void requireRelation(
-      com.luokuiai.forga.core.model.RelationRef relation, ResolverCapabilities capabilities) {
-    if (!capabilities.supports(relation)) {
-      throw new PolicyValidationException("unsupported relation: " + relation.name());
-    }
-  }
-
-  private static void requireCaveat(
-      com.luokuiai.forga.core.model.CaveatRef caveat, ResolverCapabilities capabilities) {
-    if (!capabilities.supports(caveat)) {
-      throw new PolicyValidationException("unsupported caveat: " + caveat.name());
-    }
   }
 
   private static String fingerprint(PolicyDefinition definition) {

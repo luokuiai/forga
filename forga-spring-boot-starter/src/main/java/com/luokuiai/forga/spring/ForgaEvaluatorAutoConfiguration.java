@@ -1,14 +1,16 @@
 package com.luokuiai.forga.spring;
 
 import com.luokuiai.forga.core.eval.AuthorizationEvaluator;
+import com.luokuiai.forga.core.eval.AttributeLookup;
 import com.luokuiai.forga.core.eval.CaveatEvaluator;
 import com.luokuiai.forga.core.eval.EvaluationLimits;
 import com.luokuiai.forga.core.eval.ObjectListingLookup;
 import com.luokuiai.forga.core.eval.PermissionGrantLookup;
 import com.luokuiai.forga.core.eval.RelationshipLookup;
 import com.luokuiai.forga.core.policy.CompiledPolicy;
-import com.luokuiai.forga.resolver.RelationshipResolver;
+import com.luokuiai.forga.resolver.Resolver;
 import com.luokuiai.forga.resolver.ResolverRegistry;
+import com.luokuiai.forga.resolver.ResolverRegistryAttributeLookup;
 import com.luokuiai.forga.resolver.ResolverRegistryObjectListingLookup;
 import com.luokuiai.forga.resolver.ResolverRegistryRelationshipLookup;
 import java.util.List;
@@ -36,7 +38,7 @@ public class ForgaEvaluatorAutoConfiguration {
    */
   @Bean
   @ConditionalOnMissingBean
-  public ResolverRegistry forgaResolverRegistry(List<RelationshipResolver> resolvers) {
+  public ResolverRegistry forgaResolverRegistry(List<Resolver> resolvers) {
     return new ResolverRegistry(resolvers);
   }
 
@@ -65,6 +67,18 @@ public class ForgaEvaluatorAutoConfiguration {
   }
 
   /**
+   * Adapts registered attribute resolvers to evaluator attribute lookups.
+   *
+   * @param resolvers resolver registry
+   * @return attribute lookup
+   */
+  @Bean
+  @ConditionalOnMissingBean(AttributeLookup.class)
+  public AttributeLookup forgaAttributeLookup(ResolverRegistry resolvers) {
+    return new ResolverRegistryAttributeLookup(resolvers);
+  }
+
+  /**
    * Provides conservative evaluator bounds.
    *
    * @return default evaluation limits
@@ -82,6 +96,7 @@ public class ForgaEvaluatorAutoConfiguration {
    * @param resolvers resolver registry
    * @param relationships forward relationship lookup
    * @param objectListings reverse object listing lookup
+   * @param attributes object attribute lookup
    * @param limits evaluation limits
    * @param caveats optional caveat evaluator
    * @param grants optional host effective permission grant lookup
@@ -95,11 +110,12 @@ public class ForgaEvaluatorAutoConfiguration {
       ResolverRegistry resolvers,
       RelationshipLookup relationships,
       ObjectListingLookup objectListings,
+      AttributeLookup attributes,
       EvaluationLimits limits,
       ObjectProvider<CaveatEvaluator> caveats,
       ObjectProvider<PermissionGrantLookup> grants) {
-    ForgaResolverValidator.validateForwardCapabilities(policy, resolvers);
-    CaveatEvaluator caveatEvaluator = caveats.getIfAvailable();
+    CaveatEvaluator caveatEvaluator = caveats.getIfAvailable(CaveatEvaluator::denyAll);
+    ForgaResolverValidator.validateCheckCapabilities(policy, resolvers, caveatEvaluator);
     PermissionGrantLookup grantLookup = grants.getIfAvailable();
     if (grantLookup == null && ForgaResolverValidator.requiresGrantLookup(policy)) {
       throw new ForgaRuntimeException(
@@ -110,7 +126,8 @@ public class ForgaEvaluatorAutoConfiguration {
         relationships,
         objectListings,
         limits,
-        caveatEvaluator == null ? (caveat, request) -> false : caveatEvaluator,
+        caveatEvaluator,
+        attributes,
         grantLookup == null ? PermissionGrantLookup.denyAll() : grantLookup);
   }
 

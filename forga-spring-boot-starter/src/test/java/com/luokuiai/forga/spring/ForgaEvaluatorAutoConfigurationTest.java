@@ -3,13 +3,14 @@ package com.luokuiai.forga.spring;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.luokuiai.forga.core.eval.AuthorizationEvaluator;
+import com.luokuiai.forga.core.eval.AttributeLookup;
+import com.luokuiai.forga.core.eval.BatchResolution;
 import com.luokuiai.forga.core.eval.CaveatEvaluator;
 import com.luokuiai.forga.core.eval.CheckDecision;
 import com.luokuiai.forga.core.eval.CheckRequest;
 import com.luokuiai.forga.core.eval.EvaluationLimits;
 import com.luokuiai.forga.core.eval.ObjectListingLookup;
 import com.luokuiai.forga.core.eval.PermissionGrantLookup;
-import com.luokuiai.forga.core.eval.PermissionGrantResult;
 import com.luokuiai.forga.core.eval.RelationshipLookup;
 import com.luokuiai.forga.core.model.AttributeRef;
 import com.luokuiai.forga.core.model.CaveatRef;
@@ -21,18 +22,15 @@ import com.luokuiai.forga.core.policy.CompiledPolicy;
 import com.luokuiai.forga.core.policy.PermissionExpression;
 import com.luokuiai.forga.core.policy.PolicyCompiler;
 import com.luokuiai.forga.core.policy.PolicyDefinition;
-import com.luokuiai.forga.core.policy.ResolverCapabilities;
-import com.luokuiai.forga.resolver.AttributeResolutionBatchRequest;
-import com.luokuiai.forga.resolver.AttributeResolutionBatchResponse;
 import com.luokuiai.forga.resolver.DirectSubject;
 import com.luokuiai.forga.resolver.ForwardRelationshipBatchRequest;
 import com.luokuiai.forga.resolver.ForwardRelationshipBatchResponse;
+import com.luokuiai.forga.resolver.ForwardRelationshipResolver;
 import com.luokuiai.forga.resolver.ForwardRelationshipResponse;
-import com.luokuiai.forga.resolver.RelationshipResolver;
-import com.luokuiai.forga.resolver.ResolverDescriptor;
 import com.luokuiai.forga.resolver.ResolverRegistry;
 import com.luokuiai.forga.resolver.ReverseRelationshipBatchRequest;
 import com.luokuiai.forga.resolver.ReverseRelationshipBatchResponse;
+import com.luokuiai.forga.resolver.ReverseRelationshipResolver;
 import com.luokuiai.forga.resolver.ReverseRelationshipResponse;
 import java.util.ArrayList;
 import java.util.List;
@@ -56,6 +54,8 @@ class ForgaEvaluatorAutoConfigurationTest {
   private static final PermissionRef VIEW = new PermissionRef("view");
 
   private static final CaveatRef ACTIVE = new CaveatRef("active");
+
+  private static final AttributeRef STATUS = new AttributeRef("status");
 
   private static final ObjectRef DOCUMENT = new ObjectRef("document", "one");
 
@@ -83,6 +83,7 @@ class ForgaEvaluatorAutoConfigurationTest {
               assertThat(context).hasSingleBean(ResolverRegistry.class);
               assertThat(context).hasSingleBean(RelationshipLookup.class);
               assertThat(context).hasSingleBean(ObjectListingLookup.class);
+              assertThat(context).hasSingleBean(AttributeLookup.class);
               assertThat(context).hasSingleBean(EvaluationLimits.class);
 
               CheckDecision decision =
@@ -224,15 +225,20 @@ class ForgaEvaluatorAutoConfigurationTest {
             });
   }
 
-  private static CompiledPolicy policy(PermissionExpression expression) {
-    return policy(expression, List.of());
+  @Test
+  void missingCaveatAttributeResolverFailsStartup() {
+    contextRunner
+        .withUserConfiguration(MissingCaveatAttributeConfiguration.class)
+        .run(
+            context -> {
+              assertThat(context).hasFailed();
+              assertThat(context.getStartupFailure())
+                  .hasRootCauseMessage("missing attribute resolver for caveat active: status");
+            });
   }
 
-  private static CompiledPolicy policy(
-      PermissionExpression expression, List<CaveatRef> caveats) {
-    return PolicyCompiler.compile(
-        new PolicyDefinition(Map.of(VIEW, expression)),
-        ResolverCapabilities.of(List.of(VIEWER), caveats));
+  private static CompiledPolicy policy(PermissionExpression expression) {
+    return PolicyCompiler.compile(new PolicyDefinition(Map.of(VIEW, expression)));
   }
 
   @Configuration(proxyBeanMethods = false)
@@ -245,7 +251,7 @@ class ForgaEvaluatorAutoConfigurationTest {
     }
 
     @Bean
-    RelationshipResolver relationshipResolver() {
+    ForwardRelationshipResolver relationshipResolver() {
       return new TestResolver(Set.of(VIEWER), Set.of());
     }
   }
@@ -259,7 +265,7 @@ class ForgaEvaluatorAutoConfigurationTest {
     }
 
     @Bean
-    RelationshipResolver relationshipResolver() {
+    ForwardRelationshipResolver relationshipResolver() {
       return new TestResolver(Set.of(VIEWER), Set.of(VIEWER));
     }
   }
@@ -269,7 +275,7 @@ class ForgaEvaluatorAutoConfigurationTest {
   static class MissingPolicyConfiguration {
 
     @Bean
-    RelationshipResolver relationshipResolver() {
+    ForwardRelationshipResolver relationshipResolver() {
       return new TestResolver(Set.of(VIEWER), Set.of(VIEWER));
     }
   }
@@ -294,7 +300,7 @@ class ForgaEvaluatorAutoConfigurationTest {
     }
 
     @Bean
-    RelationshipResolver relationshipResolver() {
+    ForwardRelationshipResolver relationshipResolver() {
       return new TestResolver(Set.of(), Set.of());
     }
   }
@@ -310,11 +316,12 @@ class ForgaEvaluatorAutoConfigurationTest {
 
     @Bean
     PermissionGrantLookup permissionGrantLookup() {
-      return requests ->
-          requests.stream()
-              .collect(
-                  java.util.stream.Collectors.toUnmodifiableMap(
-                      request -> request, request -> new PermissionGrantResult(true)));
+      return (requests, context) ->
+          BatchResolution.unversioned(
+              requests.stream()
+                  .collect(
+                      java.util.stream.Collectors.toUnmodifiableMap(
+                          request -> request, request -> true)));
     }
   }
 
@@ -335,7 +342,7 @@ class ForgaEvaluatorAutoConfigurationTest {
     private static final AuthorizationEvaluator EVALUATOR =
         new AuthorizationEvaluator(
             policy(PermissionExpression.relation(VIEWER)),
-            requests -> Map.of(),
+            (requests, context) -> BatchResolution.unversioned(Map.of()),
             EvaluationLimits.defaults());
 
     @Bean
@@ -352,22 +359,80 @@ class ForgaEvaluatorAutoConfigurationTest {
     @Bean
     CompiledPolicy compiledPolicy() {
       return policy(
-          PermissionExpression.caveat(PermissionExpression.relation(VIEWER), ACTIVE),
-          List.of(ACTIVE));
+          PermissionExpression.caveat(PermissionExpression.relation(VIEWER), ACTIVE));
     }
 
     @Bean
     CaveatEvaluator caveatEvaluator() {
-      return (caveat, request) -> ACTIVE.equals(caveat);
+      return new CaveatEvaluator() {
+        @Override
+        public Set<CaveatRef> caveats() {
+          return Set.of(ACTIVE);
+        }
+
+        @Override
+        public Set<AttributeRef> requiredAttributes(CaveatRef caveat) {
+          return Set.of();
+        }
+
+        @Override
+        public boolean evaluate(
+            CaveatRef caveat, com.luokuiai.forga.core.eval.CaveatEvaluationContext context) {
+          return ACTIVE.equals(caveat);
+        }
+      };
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  @EnableForga
+  static class MissingCaveatAttributeConfiguration extends EnabledConfiguration {
+
+    @Override
+    @Bean
+    CompiledPolicy compiledPolicy() {
+      return policy(
+          PermissionExpression.caveat(PermissionExpression.relation(VIEWER), ACTIVE));
+    }
+
+    @Bean
+    CaveatEvaluator caveatEvaluator() {
+      return new CaveatEvaluator() {
+        @Override
+        public Set<CaveatRef> caveats() {
+          return Set.of(ACTIVE);
+        }
+
+        @Override
+        public Set<AttributeRef> requiredAttributes(CaveatRef caveat) {
+          return Set.of(STATUS);
+        }
+
+        @Override
+        public boolean evaluate(
+            CaveatRef caveat, com.luokuiai.forga.core.eval.CaveatEvaluationContext context) {
+          return true;
+        }
+      };
     }
   }
 
   private record TestResolver(Set<RelationRef> forward, Set<RelationRef> reverse)
-      implements RelationshipResolver {
+      implements ForwardRelationshipResolver, ReverseRelationshipResolver {
 
     @Override
-    public ResolverDescriptor descriptor() {
-      return new ResolverDescriptor("test", forward, reverse, Set.<AttributeRef>of());
+    public String name() {
+      return "test";
+    }
+
+    @Override
+    public Set<RelationRef> forwardRelations() {
+      return forward;
+    }
+
+    @Override
+    public Set<RelationRef> reverseRelations() {
+      return reverse;
     }
 
     @Override
@@ -386,12 +451,6 @@ class ForgaEvaluatorAutoConfigurationTest {
           request.requests().stream()
               .map(item -> new ReverseRelationshipResponse(item, List.of(DOCUMENT)))
               .toList());
-    }
-
-    @Override
-    public AttributeResolutionBatchResponse resolveAttributes(
-        AttributeResolutionBatchRequest request) {
-      return null;
     }
   }
 }

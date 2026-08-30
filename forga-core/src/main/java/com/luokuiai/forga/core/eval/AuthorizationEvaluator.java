@@ -1,5 +1,6 @@
 package com.luokuiai.forga.core.eval;
 
+import com.luokuiai.forga.core.model.AttributeRef;
 import com.luokuiai.forga.core.model.ObjectRef;
 import com.luokuiai.forga.core.model.RelationRef;
 import com.luokuiai.forga.core.model.SubjectRef;
@@ -46,6 +47,8 @@ public final class AuthorizationEvaluator {
 
   private final CaveatEvaluator caveats;
 
+  private final AttributeLookup attributes;
+
   private final PermissionGrantLookup grants;
 
   private final ListingCursorCodec cursorCodec;
@@ -59,7 +62,7 @@ public final class AuthorizationEvaluator {
    */
   public AuthorizationEvaluator(
       CompiledPolicy policy, RelationshipLookup relationships, EvaluationLimits limits) {
-    this(policy, relationships, null, limits, (caveat, request) -> false);
+    this(policy, relationships, null, limits, CaveatEvaluator.denyAll());
   }
 
   /**
@@ -75,7 +78,7 @@ public final class AuthorizationEvaluator {
       RelationshipLookup relationships,
       ObjectListingLookup objectListings,
       EvaluationLimits limits) {
-    this(policy, relationships, objectListings, limits, (caveat, request) -> false);
+    this(policy, relationships, objectListings, limits, CaveatEvaluator.denyAll());
   }
 
   /**
@@ -115,6 +118,7 @@ public final class AuthorizationEvaluator {
         objectListings,
         limits,
         caveats,
+        AttributeLookup.unavailable(),
         PermissionGrantLookup.denyAll());
   }
 
@@ -126,6 +130,7 @@ public final class AuthorizationEvaluator {
    * @param objectListings reverse object listing lookup
    * @param limits evaluation limits
    * @param caveats caveat evaluator
+   * @param attributes host-owned object attribute lookup
    * @param grants host-owned effective permission grant lookup
    */
   public AuthorizationEvaluator(
@@ -134,12 +139,14 @@ public final class AuthorizationEvaluator {
       ObjectListingLookup objectListings,
       EvaluationLimits limits,
       CaveatEvaluator caveats,
+      AttributeLookup attributes,
       PermissionGrantLookup grants) {
     this.policy = Objects.requireNonNull(policy, "policy is required");
     this.relationships = Objects.requireNonNull(relationships, "relationships is required");
     this.objectListings = objectListings;
     this.limits = Objects.requireNonNull(limits, "limits are required");
     this.caveats = Objects.requireNonNull(caveats, "caveats are required");
+    this.attributes = Objects.requireNonNull(attributes, "attributes are required");
     this.grants = Objects.requireNonNull(grants, "grants are required");
     this.cursorCodec = new ListingCursorCodec();
   }
@@ -178,18 +185,30 @@ public final class AuthorizationEvaluator {
           .toList();
     }
     Map<RelationLookupRequest, List<RelationshipEntry>> sharedCache = new HashMap<>();
-    Map<CheckRequest, PermissionGrantResult> sharedGrantCache = new HashMap<>();
+    Map<CheckRequest, Boolean> sharedGrantCache = new HashMap<>();
     Map<CheckRequest, DecisionReason> sharedGrantFailures = new HashMap<>();
-    prefetchBulk(
-        immutableRequests,
-        new EvaluationState(sharedCache, sharedGrantCache, sharedGrantFailures));
+    Map<AttributeLookupRequest, Map<AttributeRef, String>> sharedAttributeCache = new HashMap<>();
+    Map<AttributeLookupRequest, DecisionReason> sharedAttributeFailures = new HashMap<>();
+    EvaluationState prefetchState =
+        new EvaluationState(
+            sharedCache,
+            sharedGrantCache,
+            sharedGrantFailures,
+            sharedAttributeCache,
+            sharedAttributeFailures);
+    prefetchBulk(immutableRequests, prefetchState);
     return immutableRequests.stream()
         .map(
             request ->
                 check(
                     request,
                     new EvaluationState(
-                        sharedCache, sharedGrantCache, sharedGrantFailures)))
+                        sharedCache,
+                        sharedGrantCache,
+                        sharedGrantFailures,
+                        sharedAttributeCache,
+                        sharedAttributeFailures,
+                        prefetchState.consistency)))
         .toList();
   }
 
@@ -278,9 +297,38 @@ public final class AuthorizationEvaluator {
       Map<RelationLookupRequest, List<BulkContinuation>> continuations = new LinkedHashMap<>();
       Set<CheckRequest> grantRequests = new LinkedHashSet<>();
       ArrayDeque<BulkWork> pending = new ArrayDeque<>(frontier);
-      while (!pending.isEmpty()) {
-        expandBulkWork(
-            pending.removeFirst(), pending, continuations, grantRequests, visited);
+      while (true) {
+        List<BulkWork> caveatWorks = new ArrayList<>();
+        while (!pending.isEmpty()) {
+          expandBulkWork(
+              pending.removeFirst(),
+              pending,
+              continuations,
+              grantRequests,
+              caveatWorks,
+              visited);
+        }
+        if (caveatWorks.isEmpty()) {
+          break;
+        }
+        if (!prefetchCaveatAttributes(caveatWorks, state)) {
+          return;
+        }
+        for (BulkWork caveatWork : caveatWorks) {
+          CaveatExpression caveatExpression = (CaveatExpression) caveatWork.expression();
+          if (evaluateCaveat(
+              caveatExpression.caveat(),
+              caveatWork.request(),
+              caveatWork.object(),
+              caveatWork.request().subject(),
+              state)) {
+            pending.addLast(
+                new BulkWork(
+                    caveatWork.request(),
+                    caveatWork.object(),
+                    caveatExpression.expression()));
+          }
+        }
       }
       if (!prefetchGrants(grantRequests, state)) {
         return;
@@ -300,6 +348,7 @@ public final class AuthorizationEvaluator {
       ArrayDeque<BulkWork> pending,
       Map<RelationLookupRequest, List<BulkContinuation>> continuations,
       Set<CheckRequest> grantRequests,
+      List<BulkWork> caveatWorks,
       Set<BulkWork> visited) {
     if (!visited.add(work)) {
       return;
@@ -331,11 +380,85 @@ public final class AuthorizationEvaluator {
           new RelationLookupRequest(work.object(), traversalExpression.relation()),
           new BulkContinuation(
               work.request(), Optional.of(traversalExpression.expression())));
-    } else if (expression instanceof CaveatExpression caveatExpression
-        && caveats.evaluate(caveatExpression.caveat(), work.request())) {
-      pending.addLast(
-          new BulkWork(work.request(), work.object(), caveatExpression.expression()));
+    } else if (expression instanceof CaveatExpression) {
+      caveatWorks.add(work);
     }
+  }
+
+  private boolean prefetchCaveatAttributes(List<BulkWork> works, EvaluationState state) {
+    List<AttributeLookupRequest> requests = new ArrayList<>();
+    for (BulkWork work : works) {
+      CaveatExpression caveatExpression = (CaveatExpression) work.expression();
+      Optional<AttributeLookupRequest> request =
+          attributeRequest(caveatExpression.caveat(), work.object(), state);
+      if (state.deniedReason != DecisionReason.NO_MATCH) {
+        return false;
+      }
+      request.ifPresent(requests::add);
+    }
+    return prefetchAttributes(requests, state);
+  }
+
+  private boolean prefetchAttributes(
+      List<AttributeLookupRequest> requests, EvaluationState state) {
+    List<AttributeLookupRequest> missing =
+        requests.stream()
+            .distinct()
+            .filter(request -> !state.attributeCache.containsKey(request))
+            .filter(request -> !state.attributeFailures.containsKey(request))
+            .toList();
+    if (missing.isEmpty()) {
+      return true;
+    }
+    if (!state.allowAttributeCalls(missing)) {
+      return false;
+    }
+    BatchResolution<AttributeLookupRequest, Map<AttributeRef, String>> batch;
+    try {
+      batch = attributes.resolve(missing, state.readContext());
+    } catch (RelationshipLookupException exception) {
+      recordAttributeFailure(missing, state, exception.reason());
+      return false;
+    } catch (RuntimeException exception) {
+      recordAttributeFailure(missing, state, DecisionReason.RESOLVER_FAILURE);
+      return false;
+    }
+    if (batch == null || !completeAttributeBatch(missing, batch.values())) {
+      recordAttributeFailure(missing, state, DecisionReason.RESOLVER_FAILURE);
+      return false;
+    }
+    if (!state.acceptConsistency(batch.consistency())) {
+      recordAttributeFailure(missing, state, state.deniedReason);
+      return false;
+    }
+    for (AttributeLookupRequest request : missing) {
+      Map<AttributeRef, String> values = Map.copyOf(batch.values().get(request));
+      if (!request.attributes().containsAll(values.keySet())) {
+        recordAttributeFailure(missing, state, DecisionReason.RESOLVER_FAILURE);
+        return false;
+      }
+      if (!state.allowIntermediateResults(values.size())) {
+        recordAttributeFailure(missing, state, state.deniedReason);
+        return false;
+      }
+      state.attributeCache.put(request, values);
+    }
+    return true;
+  }
+
+  private static boolean completeAttributeBatch(
+      List<AttributeLookupRequest> requests,
+      Map<AttributeLookupRequest, Map<AttributeRef, String>> resolved) {
+    return resolved != null
+        && resolved.size() == requests.size()
+        && resolved.keySet().equals(Set.copyOf(requests))
+        && resolved.values().stream().allMatch(Objects::nonNull);
+  }
+
+  private static void recordAttributeFailure(
+      List<AttributeLookupRequest> requests, EvaluationState state, DecisionReason reason) {
+    requests.forEach(request -> state.attributeFailures.put(request, reason));
+    state.deniedReason = reason;
   }
 
   private boolean prefetchGrants(Set<CheckRequest> requests, EvaluationState state) {
@@ -347,9 +470,9 @@ public final class AuthorizationEvaluator {
     if (missing.isEmpty()) {
       return true;
     }
-    Map<CheckRequest, PermissionGrantResult> resolved;
+    BatchResolution<CheckRequest, Boolean> batch;
     try {
-      resolved = grants.resolve(missing, state.deadline);
+      batch = grants.resolve(missing, state.readContext());
     } catch (RelationshipLookupException exception) {
       recordGrantFailure(missing, state, exception.reason());
       return false;
@@ -357,16 +480,20 @@ public final class AuthorizationEvaluator {
       recordGrantFailure(missing, state, DecisionReason.RESOLVER_FAILURE);
       return false;
     }
-    if (!completeGrantBatch(missing, resolved)) {
+    if (batch == null || !completeGrantBatch(missing, batch.values())) {
       recordGrantFailure(missing, state, DecisionReason.RESOLVER_FAILURE);
       return false;
     }
-    resolved.forEach(state.grantCache::put);
+    if (!state.acceptConsistency(batch.consistency())) {
+      recordGrantFailure(missing, state, state.deniedReason);
+      return false;
+    }
+    batch.values().forEach(state.grantCache::put);
     return true;
   }
 
   private static boolean completeGrantBatch(
-      List<CheckRequest> requests, Map<CheckRequest, PermissionGrantResult> resolved) {
+      List<CheckRequest> requests, Map<CheckRequest, Boolean> resolved) {
     return resolved != null
         && resolved.size() == requests.size()
         && resolved.keySet().equals(Set.copyOf(requests))
@@ -396,9 +523,9 @@ public final class AuthorizationEvaluator {
     if (!state.allowResolverCall()) {
       return false;
     }
-    Map<RelationLookupRequest, List<RelationshipEntry>> resolved;
+    BatchResolution<RelationLookupRequest, List<RelationshipEntry>> batch;
     try {
-      resolved = relationships.resolve(missing, state.deadline);
+      batch = relationships.resolve(missing, state.readContext());
     } catch (RelationshipLookupException exception) {
       state.deniedReason = exception.reason();
       return false;
@@ -406,19 +533,30 @@ public final class AuthorizationEvaluator {
       state.deniedReason = DecisionReason.RESOLVER_FAILURE;
       return false;
     }
-    if (resolved == null) {
+    if (batch == null || !completeRelationshipBatch(missing, batch.values())) {
       state.deniedReason = DecisionReason.RESOLVER_FAILURE;
       return false;
     }
+    if (!state.acceptConsistency(batch.consistency())) {
+      return false;
+    }
     for (RelationLookupRequest request : missing) {
-      List<RelationshipEntry> entries =
-          List.copyOf(resolved.getOrDefault(request, List.of()));
+      List<RelationshipEntry> entries = List.copyOf(batch.values().get(request));
       if (!state.allowIntermediateResults(entries.size())) {
         return false;
       }
       state.cache.put(request, entries);
     }
     return true;
+  }
+
+  private static boolean completeRelationshipBatch(
+      List<RelationLookupRequest> requests,
+      Map<RelationLookupRequest, List<RelationshipEntry>> resolved) {
+    return resolved != null
+        && resolved.size() == requests.size()
+        && resolved.keySet().equals(Set.copyOf(requests))
+        && resolved.values().stream().allMatch(Objects::nonNull);
   }
 
   private static List<BulkWork> nextBulkFrontier(
@@ -500,10 +638,65 @@ public final class AuthorizationEvaluator {
       return traverse(traversalExpression, request, object, subject, state, depth);
     }
     if (expression instanceof CaveatExpression caveatExpression) {
-      return caveats.evaluate(caveatExpression.caveat(), request)
+      return evaluateCaveat(
+              caveatExpression.caveat(), request, object, subject, state)
           && evaluate(caveatExpression.expression(), request, object, subject, state, depth + 1);
     }
     return false;
+  }
+
+  private boolean evaluateCaveat(
+      com.luokuiai.forga.core.model.CaveatRef caveat,
+      CheckRequest request,
+      ObjectRef object,
+      SubjectRef subject,
+      EvaluationState state) {
+    Optional<AttributeLookupRequest> attributeRequest = attributeRequest(caveat, object, state);
+    if (state.deniedReason != DecisionReason.NO_MATCH) {
+      return false;
+    }
+    Map<AttributeRef, String> objectAttributes = Map.of();
+    if (attributeRequest.isPresent()) {
+      AttributeLookupRequest lookupRequest = attributeRequest.orElseThrow();
+      if (!state.allowAttributeCall(lookupRequest)) {
+        return false;
+      }
+      if (!prefetchAttributes(List.of(lookupRequest), state)) {
+        return false;
+      }
+      DecisionReason failure = state.attributeFailures.get(lookupRequest);
+      if (failure != null) {
+        state.deniedReason = failure;
+        return false;
+      }
+      objectAttributes = state.attributeCache.getOrDefault(lookupRequest, Map.of());
+    }
+    try {
+      return caveats.evaluate(
+          caveat, new CaveatEvaluationContext(request, object, subject, objectAttributes));
+    } catch (RuntimeException exception) {
+      state.deniedReason = DecisionReason.RESOLVER_FAILURE;
+      return false;
+    }
+  }
+
+  private Optional<AttributeLookupRequest> attributeRequest(
+      com.luokuiai.forga.core.model.CaveatRef caveat,
+      ObjectRef object,
+      EvaluationState state) {
+    try {
+      if (!Set.copyOf(caveats.caveats()).contains(caveat)) {
+        state.deniedReason = DecisionReason.RESOLVER_FAILURE;
+        return Optional.empty();
+      }
+      Set<AttributeRef> required = Set.copyOf(caveats.requiredAttributes(caveat));
+      return required.isEmpty()
+          ? Optional.empty()
+          : Optional.of(new AttributeLookupRequest(object, required));
+    } catch (RuntimeException exception) {
+      state.deniedReason = DecisionReason.RESOLVER_FAILURE;
+      return Optional.empty();
+    }
   }
 
   private boolean resolveGrant(CheckRequest request, EvaluationState state) {
@@ -515,11 +708,11 @@ public final class AuthorizationEvaluator {
       state.deniedReason = cachedFailure;
       return false;
     }
-    PermissionGrantResult result = state.grantCache.get(request);
-    if (result == null) {
-      Map<CheckRequest, PermissionGrantResult> resolved;
+    Boolean granted = state.grantCache.get(request);
+    if (granted == null) {
+      BatchResolution<CheckRequest, Boolean> batch;
       try {
-        resolved = grants.resolve(List.of(request), state.deadline);
+        batch = grants.resolve(List.of(request), state.readContext());
       } catch (RelationshipLookupException exception) {
         state.deniedReason = exception.reason();
         return false;
@@ -527,14 +720,17 @@ public final class AuthorizationEvaluator {
         state.deniedReason = DecisionReason.RESOLVER_FAILURE;
         return false;
       }
-      if (!completeGrantBatch(List.of(request), resolved)) {
+      if (batch == null || !completeGrantBatch(List.of(request), batch.values())) {
         state.deniedReason = DecisionReason.RESOLVER_FAILURE;
         return false;
       }
-      result = resolved.get(request);
-      state.grantCache.put(request, result);
+      if (!state.acceptConsistency(batch.consistency())) {
+        return false;
+      }
+      granted = batch.values().get(request);
+      state.grantCache.put(request, granted);
     }
-    return state.acceptConsistency(result.consistency()) && result.granted();
+    return granted;
   }
 
   private static CheckRequest grantRequest(
@@ -622,13 +818,9 @@ public final class AuthorizationEvaluator {
       List<RelationshipEntry> entries = state.cache.get(request);
       return state.allowIntermediateResults(entries.size()) ? entries : List.of();
     }
-    List<RelationshipEntry> entries;
+    BatchResolution<RelationLookupRequest, List<RelationshipEntry>> batch;
     try {
-      entries =
-          List.copyOf(
-              relationships
-                  .resolve(List.of(request), state.deadline)
-                  .getOrDefault(request, List.of()));
+      batch = relationships.resolve(List.of(request), state.readContext());
     } catch (RelationshipLookupException exception) {
       state.forgetResolverCall(request);
       state.deniedReason = exception.reason();
@@ -638,6 +830,16 @@ public final class AuthorizationEvaluator {
       state.deniedReason = DecisionReason.RESOLVER_FAILURE;
       return List.of();
     }
+    if (batch == null || !completeRelationshipBatch(List.of(request), batch.values())) {
+      state.forgetResolverCall(request);
+      state.deniedReason = DecisionReason.RESOLVER_FAILURE;
+      return List.of();
+    }
+    if (!state.acceptConsistency(batch.consistency())) {
+      state.forgetResolverCall(request);
+      return List.of();
+    }
+    List<RelationshipEntry> entries = List.copyOf(batch.values().get(request));
     if (!state.allowIntermediateResults(entries.size())) {
       state.forgetResolverCall(request);
       return List.of();
@@ -709,17 +911,38 @@ public final class AuthorizationEvaluator {
           traversalExpression, request, objectType, resolverLimit, state);
     }
     if (expression instanceof CaveatExpression caveatExpression) {
-      CheckRequest caveatRequest =
-          new CheckRequest(
-              new ObjectRef(objectType, "listing"),
-              request.permission(),
-              request.subject(),
-              request.attributes());
-      if (!caveats.evaluate(caveatExpression.caveat(), caveatRequest)) {
+      Set<ObjectRef> candidates =
+          collectObjects(
+              caveatExpression.expression(),
+              request,
+              objectType,
+              resolverLimit,
+              state,
+              depth + 1);
+      List<AttributeLookupRequest> attributeRequests = new ArrayList<>();
+      for (ObjectRef candidate : candidates) {
+        attributeRequest(caveatExpression.caveat(), candidate, state)
+            .ifPresent(attributeRequests::add);
+      }
+      if (state.deniedReason != DecisionReason.NO_MATCH
+          || !prefetchAttributes(attributeRequests, state)) {
         return Set.of();
       }
-      return collectObjects(
-          caveatExpression.expression(), request, objectType, resolverLimit, state, depth + 1);
+      Set<ObjectRef> accepted = new LinkedHashSet<>();
+      for (ObjectRef candidate : candidates) {
+        CheckRequest caveatRequest =
+            new CheckRequest(
+                candidate, request.permission(), request.subject(), request.attributes());
+        if (evaluateCaveat(
+            caveatExpression.caveat(),
+            caveatRequest,
+            candidate,
+            request.subject(),
+            state)) {
+          accepted.add(candidate);
+        }
+      }
+      return accepted;
     }
     return Set.of();
   }
@@ -971,13 +1194,19 @@ public final class AuthorizationEvaluator {
 
     private final Map<RelationLookupRequest, List<RelationshipEntry>> cache;
 
-    private final Map<CheckRequest, PermissionGrantResult> grantCache;
+    private final Map<CheckRequest, Boolean> grantCache;
 
     private final Map<CheckRequest, DecisionReason> grantFailures;
+
+    private final Map<AttributeLookupRequest, Map<AttributeRef, String>> attributeCache;
+
+    private final Map<AttributeLookupRequest, DecisionReason> attributeFailures;
 
     private final Set<RelationLookupRequest> accountedLookups = new HashSet<>();
 
     private final Set<CheckRequest> accountedGrants = new HashSet<>();
+
+    private final Set<AttributeLookupRequest> accountedAttributes = new HashSet<>();
 
     private final Map<ReverseRelationLookupRequest, Set<ObjectRef>> reverseCache = new HashMap<>();
 
@@ -1000,21 +1229,44 @@ public final class AuthorizationEvaluator {
     private DecisionReason deniedReason = DecisionReason.NO_MATCH;
 
     EvaluationState() {
-      this(new HashMap<>(), new HashMap<>(), new HashMap<>());
+      this(new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>());
     }
 
     EvaluationState(Map<RelationLookupRequest, List<RelationshipEntry>> cache) {
-      this(cache, new HashMap<>(), new HashMap<>());
+      this(cache, new HashMap<>(), new HashMap<>(), new HashMap<>(), new HashMap<>());
     }
 
     EvaluationState(
         Map<RelationLookupRequest, List<RelationshipEntry>> cache,
-        Map<CheckRequest, PermissionGrantResult> grantCache,
-        Map<CheckRequest, DecisionReason> grantFailures) {
+        Map<CheckRequest, Boolean> grantCache,
+        Map<CheckRequest, DecisionReason> grantFailures,
+        Map<AttributeLookupRequest, Map<AttributeRef, String>> attributeCache,
+        Map<AttributeLookupRequest, DecisionReason> attributeFailures) {
+      this(
+          cache,
+          grantCache,
+          grantFailures,
+          attributeCache,
+          attributeFailures,
+          Optional.empty());
+    }
+
+    EvaluationState(
+        Map<RelationLookupRequest, List<RelationshipEntry>> cache,
+        Map<CheckRequest, Boolean> grantCache,
+        Map<CheckRequest, DecisionReason> grantFailures,
+        Map<AttributeLookupRequest, Map<AttributeRef, String>> attributeCache,
+        Map<AttributeLookupRequest, DecisionReason> attributeFailures,
+        Optional<ConsistencyToken> consistency) {
       this.cache = Objects.requireNonNull(cache, "cache is required");
       this.grantCache = Objects.requireNonNull(grantCache, "grant cache is required");
       this.grantFailures =
           Objects.requireNonNull(grantFailures, "grant failures are required");
+      this.attributeCache =
+          Objects.requireNonNull(attributeCache, "attribute cache is required");
+      this.attributeFailures =
+          Objects.requireNonNull(attributeFailures, "attribute failures are required");
+      this.consistency = consistency == null ? Optional.empty() : consistency;
       deadline = limits.timeout().map(timeout -> Instant.now().plus(timeout));
     }
 
@@ -1082,6 +1334,19 @@ public final class AuthorizationEvaluator {
       return true;
     }
 
+    boolean allowAttributeCalls(List<AttributeLookupRequest> requests) {
+      for (AttributeLookupRequest request : requests) {
+        if (!allowAttributeCall(request)) {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    boolean allowAttributeCall(AttributeLookupRequest request) {
+      return !accountedAttributes.add(request) || allowResolverCall();
+    }
+
     void forgetResolverCall(RelationLookupRequest request) {
       accountedLookups.remove(request);
     }
@@ -1136,6 +1401,10 @@ public final class AuthorizationEvaluator {
         return false;
       }
       return true;
+    }
+
+    EvaluationReadContext readContext() {
+      return new EvaluationReadContext(consistency, deadline);
     }
   }
 }

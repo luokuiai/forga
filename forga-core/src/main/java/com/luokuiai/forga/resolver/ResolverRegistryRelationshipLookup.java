@@ -1,11 +1,14 @@
 package com.luokuiai.forga.resolver;
 
+import com.luokuiai.forga.core.eval.BatchResolution;
+import com.luokuiai.forga.core.eval.DecisionReason;
+import com.luokuiai.forga.core.eval.EvaluationReadContext;
 import com.luokuiai.forga.core.eval.RelationLookupRequest;
 import com.luokuiai.forga.core.eval.RelationshipEntry;
 import com.luokuiai.forga.core.eval.RelationshipLookup;
 import com.luokuiai.forga.core.eval.RelationshipLookupException;
+import com.luokuiai.forga.core.model.ConsistencyToken;
 import java.util.ArrayList;
-import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -28,21 +31,17 @@ public final class ResolverRegistryRelationshipLookup implements RelationshipLoo
   }
 
   @Override
-  public Map<RelationLookupRequest, List<RelationshipEntry>> resolve(
-      List<RelationLookupRequest> requests) {
-    return resolve(requests, Optional.empty());
-  }
-
-  @Override
-  public Map<RelationLookupRequest, List<RelationshipEntry>> resolve(
-      List<RelationLookupRequest> requests, Optional<Instant> deadline) {
+  public BatchResolution<RelationLookupRequest, List<RelationshipEntry>> resolve(
+      List<RelationLookupRequest> requests, EvaluationReadContext context) {
+    Objects.requireNonNull(context, "context is required");
     List<RelationLookupRequest> unique = uniqueRequests(requests);
     if (unique.isEmpty()) {
-      return Map.of();
+      return new BatchResolution<>(Map.of(), context.consistency());
     }
-    Map<RelationshipResolver, List<RelationLookupRequest>> grouped = new LinkedHashMap<>();
+    Map<ForwardRelationshipResolver, List<RelationLookupRequest>> grouped =
+        new LinkedHashMap<>();
     for (RelationLookupRequest request : unique) {
-      RelationshipResolver resolver =
+      ForwardRelationshipResolver resolver =
           resolvers
               .findForward(request.relation())
               .orElseThrow(
@@ -53,11 +52,19 @@ public final class ResolverRegistryRelationshipLookup implements RelationshipLoo
     }
 
     Map<RelationLookupRequest, List<RelationshipEntry>> resolved = new LinkedHashMap<>();
-    grouped.forEach(
-        (resolver, groupedRequests) ->
-            ResolverLookupSupport.batches(groupedRequests)
-                .forEach(batch -> resolveBatch(resolver, batch, deadline, resolved)));
-    return Map.copyOf(resolved);
+    Optional<ConsistencyToken> consistency = context.consistency();
+    for (Map.Entry<ForwardRelationshipResolver, List<RelationLookupRequest>> group
+        : grouped.entrySet()) {
+      for (List<RelationLookupRequest> batch : ResolverLookupSupport.batches(group.getValue())) {
+        consistency =
+            resolveBatch(
+                group.getKey(),
+                batch,
+                new EvaluationReadContext(consistency, context.deadline()),
+                resolved);
+      }
+    }
+    return new BatchResolution<>(resolved, consistency);
   }
 
   private static List<RelationLookupRequest> uniqueRequests(List<RelationLookupRequest> requests) {
@@ -65,10 +72,10 @@ public final class ResolverRegistryRelationshipLookup implements RelationshipLoo
     return List.copyOf(new LinkedHashSet<>(List.copyOf(requests)));
   }
 
-  private static void resolveBatch(
-      RelationshipResolver resolver,
+  private static Optional<ConsistencyToken> resolveBatch(
+      ForwardRelationshipResolver resolver,
       List<RelationLookupRequest> requests,
-      Optional<Instant> deadline,
+      EvaluationReadContext context,
       Map<RelationLookupRequest, List<RelationshipEntry>> resolved) {
     Map<ForwardRelationshipRequest, RelationLookupRequest> submitted = new LinkedHashMap<>();
     for (RelationLookupRequest request : requests) {
@@ -78,7 +85,8 @@ public final class ResolverRegistryRelationshipLookup implements RelationshipLoo
               request.relation(),
               ResolverBounds.MAX_LIMIT,
               new ResolverContext(
-                  ConsistencyContext.empty(), deadline.map(ResolverDeadline::new)));
+                  new ConsistencyContext(context.consistency()),
+                  context.deadline().map(ResolverDeadline::new)));
       submitted.put(resolverRequest, request);
     }
 
@@ -91,24 +99,43 @@ public final class ResolverRegistryRelationshipLookup implements RelationshipLoo
       throw exception;
     } catch (RuntimeException exception) {
       throw ResolverLookupSupport.failure(
-          "forward resolver failed: " + resolver.descriptor().name());
+          "forward resolver failed: " + resolver.name());
     }
     if (batchResponse == null || batchResponse.responses().size() != submitted.size()) {
       throw ResolverLookupSupport.failure(
-          "forward resolver returned an incomplete batch: " + resolver.descriptor().name());
+          "forward resolver returned an incomplete batch: " + resolver.name());
     }
+    Optional<ConsistencyToken> consistency = context.consistency();
     for (ForwardRelationshipResponse response : batchResponse.responses()) {
       RelationLookupRequest request = submitted.remove(response.request());
       if (request == null) {
         throw ResolverLookupSupport.failure(
-            "forward resolver returned an unexpected response: " + resolver.descriptor().name());
+            "forward resolver returned an unexpected response: " + resolver.name());
       }
+      consistency = acceptConsistency(consistency, response.consistency().token());
       resolved.put(request, entries(response.subjects()));
     }
     if (!submitted.isEmpty()) {
       throw ResolverLookupSupport.failure(
-          "forward resolver omitted a response: " + resolver.descriptor().name());
+          "forward resolver omitted a response: " + resolver.name());
     }
+    return consistency;
+  }
+
+  private static Optional<ConsistencyToken> acceptConsistency(
+      Optional<ConsistencyToken> established, Optional<ConsistencyToken> returned) {
+    if (returned.isEmpty()) {
+      return established;
+    }
+    if (established.isEmpty()) {
+      return returned;
+    }
+    if (!established.equals(returned)) {
+      throw new RelationshipLookupException(
+          DecisionReason.CONSISTENCY_CONFLICT,
+          "forward resolver returned a conflicting consistency token");
+    }
+    return established;
   }
 
   private static List<RelationshipEntry> entries(List<RelationshipSubject> subjects) {

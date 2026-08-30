@@ -14,12 +14,12 @@ import com.luokuiai.forga.core.policy.CompiledPolicy;
 import com.luokuiai.forga.core.policy.PermissionExpression;
 import com.luokuiai.forga.core.policy.PolicyCompiler;
 import com.luokuiai.forga.core.policy.PolicyDefinition;
-import com.luokuiai.forga.core.policy.ResolverCapabilities;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class AuthorizationObjectListingTest {
@@ -167,8 +167,23 @@ class AuthorizationObjectListingTest {
             new CountingLookup(),
             listing,
             EvaluationLimits.defaults(),
-            (caveat, request) ->
-                active.equals(caveat) && "active".equals(request.attributes().get(status)));
+            new CaveatEvaluator() {
+              @Override
+              public Set<CaveatRef> caveats() {
+                return Set.of(active);
+              }
+
+              @Override
+              public Set<AttributeRef> requiredAttributes(CaveatRef caveat) {
+                return Set.of();
+              }
+
+              @Override
+              public boolean evaluate(CaveatRef caveat, CaveatEvaluationContext context) {
+                return active.equals(caveat)
+                    && "active".equals(context.request().attributes().get(status));
+              }
+            });
     ListObjectsRequest request =
         new ListObjectsRequest(
             "document", VIEW, ALICE, 10, Optional.empty(), Map.of(status, "active"));
@@ -446,16 +461,11 @@ class AuthorizationObjectListingTest {
         new PolicyDefinition(
             Map.of(
                 VIEW, PermissionExpression.relation(VIEWER),
-                EDIT, PermissionExpression.relation(VIEWER))),
-        ResolverCapabilities.of(List.of(VIEWER), List.of()));
+                EDIT, PermissionExpression.relation(VIEWER))));
   }
 
   private static CompiledPolicy policy(PermissionExpression expression) {
-    return PolicyCompiler.compile(
-        new PolicyDefinition(Map.of(VIEW, expression)),
-        ResolverCapabilities.of(
-            List.of(VIEWER, EDITOR, BLOCKED, PARENT, MEMBER),
-            List.of(new CaveatRef("active"))));
+    return PolicyCompiler.compile(new PolicyDefinition(Map.of(VIEW, expression)));
   }
 
   private static ListObjectsRequest request() {
@@ -485,11 +495,11 @@ class AuthorizationObjectListingTest {
     }
 
     @Override
-    public Map<RelationLookupRequest, List<RelationshipEntry>> resolve(
-        List<RelationLookupRequest> requests) {
+    public BatchResolution<RelationLookupRequest, List<RelationshipEntry>> resolve(
+        List<RelationLookupRequest> requests, EvaluationReadContext context) {
       Map<RelationLookupRequest, List<RelationshipEntry>> result = new HashMap<>();
       requests.forEach(request -> result.put(request, entries.getOrDefault(request, List.of())));
-      return result;
+      return BatchResolution.unversioned(result);
     }
   }
 
