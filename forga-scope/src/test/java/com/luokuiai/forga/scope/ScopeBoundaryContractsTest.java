@@ -37,7 +37,8 @@ class ScopeBoundaryContractsTest {
     assertThat(request.activeScope()).isEqualTo(ACTIVE_SCOPE);
     assertThat(request.objectScope()).isEqualTo(OBJECT_SCOPE);
     assertThat(request.attributes()).containsEntry(region, "east");
-    assertThat(CrossScopeAccessResolver.denyAll().allows(request)).isFalse();
+    assertThat(CrossScopeGrantLookup.denyAll().resolve(java.util.List.of(request)))
+        .containsEntry(request, false);
   }
 
   @Test
