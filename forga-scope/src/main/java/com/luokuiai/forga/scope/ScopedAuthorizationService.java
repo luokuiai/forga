@@ -4,97 +4,88 @@ import com.luokuiai.forga.core.eval.AuthorizationEvaluator;
 import com.luokuiai.forga.core.eval.CheckDecision;
 import com.luokuiai.forga.core.eval.CheckRequest;
 import com.luokuiai.forga.core.eval.DecisionReason;
+import com.luokuiai.forga.core.model.ObjectRef;
 import com.luokuiai.forga.core.model.PermissionRef;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
-/**
- * Service facade for scope switch and active-scope permission checks.
- */
+/** Service facade for scope switching and active-scope permission checks. */
 public final class ScopedAuthorizationService {
 
   private final AuthorizationEvaluator evaluator;
 
   private final PermissionRef scopeEntryPermission;
 
-  private final ObjectScopeResolver objectScopeResolver;
+  private final ObjectScopeLookup objectScopes;
 
-  private final CrossScopeAccessResolver crossScopeAccessResolver;
+  private final CrossScopeGrantLookup crossScopeGrants;
 
   /**
-   * Creates a strict scoped authorization service that denies cross-scope access.
+   * Creates a strict service that denies every cross-scope request.
    *
    * @param evaluator evaluator used for underlying authorization checks
-   * @param objectScopeResolver host resolver for object ownership
+   * @param objectScopes host lookup for object ownership
    * @return strict scoped authorization service
    */
   public static ScopedAuthorizationService strict(
-      AuthorizationEvaluator evaluator, ObjectScopeResolver objectScopeResolver) {
+      AuthorizationEvaluator evaluator, ObjectScopeLookup objectScopes) {
     return new ScopedAuthorizationService(
-        evaluator,
-        ScopePolicyTemplates.ENTER,
-        objectScopeResolver,
-        CrossScopeAccessResolver.denyAll());
+        evaluator, ScopePolicyTemplates.ENTER, objectScopes, CrossScopeGrantLookup.denyAll());
   }
 
   /**
-   * Creates a scoped authorization service that denies cross-scope access.
+   * Creates a service using the default scope-entry permission and denying cross-scope requests.
    *
    * @param evaluator evaluator used for underlying authorization checks
-   * @param objectScopeResolver host resolver for object ownership
+   * @param objectScopes host lookup for object ownership
    */
   public ScopedAuthorizationService(
-      AuthorizationEvaluator evaluator, ObjectScopeResolver objectScopeResolver) {
-    this(
-        evaluator,
-        ScopePolicyTemplates.ENTER,
-        objectScopeResolver,
-        CrossScopeAccessResolver.denyAll());
+      AuthorizationEvaluator evaluator, ObjectScopeLookup objectScopes) {
+    this(evaluator, ScopePolicyTemplates.ENTER, objectScopes, CrossScopeGrantLookup.denyAll());
   }
 
   /**
-   * Creates a strict scoped authorization service using the default scope entry permission.
+   * Creates a service using the default scope-entry permission.
    *
    * @param evaluator evaluator used for underlying authorization checks
-   * @param objectScopeResolver host resolver for object ownership
-   * @param crossScopeAccessResolver host resolver for explicit cross-scope grants
+   * @param objectScopes host lookup for object ownership
+   * @param crossScopeGrants host lookup for explicit cross-scope grants
    */
   public ScopedAuthorizationService(
       AuthorizationEvaluator evaluator,
-      ObjectScopeResolver objectScopeResolver,
-      CrossScopeAccessResolver crossScopeAccessResolver) {
-    this(
-        evaluator,
-        ScopePolicyTemplates.ENTER,
-        objectScopeResolver,
-        crossScopeAccessResolver);
+      ObjectScopeLookup objectScopes,
+      CrossScopeGrantLookup crossScopeGrants) {
+    this(evaluator, ScopePolicyTemplates.ENTER, objectScopes, crossScopeGrants);
   }
 
   /**
-   * Creates a strict scoped authorization service.
+   * Creates a scoped authorization service.
    *
    * @param evaluator evaluator used for underlying authorization checks
-   * @param scopeEntryPermission permission required on the active scope before object checks
-   * @param objectScopeResolver host resolver for object ownership
-   * @param crossScopeAccessResolver host resolver for explicit cross-scope grants
+   * @param scopeEntryPermission permission required on a selected scope
+   * @param objectScopes host lookup for object ownership
+   * @param crossScopeGrants host lookup for explicit cross-scope grants
    */
   public ScopedAuthorizationService(
       AuthorizationEvaluator evaluator,
       PermissionRef scopeEntryPermission,
-      ObjectScopeResolver objectScopeResolver,
-      CrossScopeAccessResolver crossScopeAccessResolver) {
+      ObjectScopeLookup objectScopes,
+      CrossScopeGrantLookup crossScopeGrants) {
     this.evaluator = Objects.requireNonNull(evaluator, "evaluator is required");
     this.scopeEntryPermission =
         Objects.requireNonNull(scopeEntryPermission, "scope entry permission is required");
-    this.objectScopeResolver =
-        Objects.requireNonNull(objectScopeResolver, "object scope resolver is required");
-    this.crossScopeAccessResolver =
-        Objects.requireNonNull(
-            crossScopeAccessResolver, "cross-scope access resolver is required");
+    this.objectScopes = Objects.requireNonNull(objectScopes, "object scopes are required");
+    this.crossScopeGrants =
+        Objects.requireNonNull(crossScopeGrants, "cross-scope grants are required");
   }
 
   /**
-   * Checks whether the subject can enter the target scope.
+   * Checks whether a subject can enter a target scope.
    *
    * @param request switch request
    * @return switch decision
@@ -105,7 +96,7 @@ public final class ScopedAuthorizationService {
         evaluator.check(
             new CheckRequest(
                 request.targetScope().toObjectRef(),
-                request.permission(),
+                scopeEntryPermission,
                 request.subject(),
                 request.attributes()));
     Optional<ActiveScope> activeScope =
@@ -114,79 +105,218 @@ public final class ScopedAuthorizationService {
   }
 
   /**
-   * Checks a permission requiring an active scope.
+   * Checks one permission requiring an active scope.
    *
    * @param request scoped permission request
    * @return scoped permission decision
    */
   public ScopedPermissionDecision check(ScopedPermissionRequest request) {
     Objects.requireNonNull(request, "request is required");
-    CheckRequest objectCheckRequest = objectCheckRequest(request);
-    if (request.activeScope().isEmpty()) {
-      return denied(request, objectCheckRequest, DecisionReason.NO_MATCH);
+    return bulkCheck(List.of(request)).get(0);
+  }
+
+  /**
+   * Checks a bounded batch of permissions requiring active scopes.
+   *
+   * <p>Boundary lookups are issued once per stage. Implementations should execute this composed
+   * call inside one host transaction or equivalent request snapshot when the backing stores can
+   * change concurrently.
+   *
+   * @param requests scoped permission requests
+   * @return decisions in request order
+   */
+  public List<ScopedPermissionDecision> bulkCheck(List<ScopedPermissionRequest> requests) {
+    List<ScopedPermissionRequest> immutableRequests = List.copyOf(requests);
+    if (immutableRequests.isEmpty()) {
+      return List.of();
     }
-    ActiveScope activeScope = request.activeScope().orElseThrow();
-    CheckDecision scopeDecision =
-        evaluator.check(
-            new CheckRequest(
-                activeScope.scope().toObjectRef(),
-                scopeEntryPermission,
+
+    Map<ScopedPermissionRequest, ScopedPermissionDecision> decisions = new LinkedHashMap<>();
+    List<ScopedPermissionRequest> withActiveScope = new ArrayList<>();
+    for (ScopedPermissionRequest request : immutableRequests) {
+      if (request.activeScope().isEmpty()) {
+        decisions.put(
+            request,
+            denied(request, ScopeAuthorizationPhase.ACTIVE_SCOPE, DecisionReason.NO_MATCH));
+      } else {
+        withActiveScope.add(request);
+      }
+    }
+
+    List<ScopedPermissionRequest> entered = evaluateScopeEntry(withActiveScope, decisions);
+    if (entered.isEmpty()) {
+      return ordered(immutableRequests, decisions);
+    }
+
+    Map<ObjectRef, Optional<ScopeRef>> ownership;
+    List<ObjectRef> objects =
+        entered.stream().map(ScopedPermissionRequest::object).distinct().toList();
+    try {
+      ownership = objectScopes.resolve(objects);
+    } catch (RuntimeException exception) {
+      failAll(
+          entered,
+          decisions,
+          ScopeAuthorizationPhase.OBJECT_SCOPE,
+          DecisionReason.RESOLVER_FAILURE);
+      return ordered(immutableRequests, decisions);
+    }
+    if (!complete(objects, ownership)) {
+      failAll(
+          entered,
+          decisions,
+          ScopeAuthorizationPhase.OBJECT_SCOPE,
+          DecisionReason.RESOLVER_FAILURE);
+      return ordered(immutableRequests, decisions);
+    }
+
+    List<ScopedPermissionRequest> boundaryAccepted = new ArrayList<>();
+    Map<ScopedPermissionRequest, CrossScopeAccessRequest> crossScopeRequests =
+        new LinkedHashMap<>();
+    for (ScopedPermissionRequest request : entered) {
+      Optional<ScopeRef> objectScope = ownership.get(request.object());
+      if (objectScope.isEmpty()) {
+        decisions.put(
+            request,
+            denied(request, ScopeAuthorizationPhase.OBJECT_SCOPE, DecisionReason.NO_MATCH));
+        continue;
+      }
+      ScopeRef activeScope = request.activeScope().orElseThrow().scope();
+      if (activeScope.equals(objectScope.orElseThrow())) {
+        boundaryAccepted.add(request);
+      } else {
+        crossScopeRequests.put(
+            request,
+            new CrossScopeAccessRequest(
+                activeScope,
+                objectScope.orElseThrow(),
+                request.object(),
+                request.permission(),
                 request.subject(),
                 request.attributes()));
-    if (!scopeDecision.allowed()) {
-      return new ScopedPermissionDecision(request, scopeDecision);
+      }
     }
-    Optional<DecisionReason> boundaryFailure =
-        boundaryFailure(request, activeScope.scope());
-    if (boundaryFailure.isPresent()) {
-      return denied(request, objectCheckRequest, boundaryFailure.orElseThrow());
-    }
-    return new ScopedPermissionDecision(request, evaluator.check(objectCheckRequest));
+
+    resolveCrossScope(crossScopeRequests, boundaryAccepted, decisions);
+    evaluateObjectPermissions(boundaryAccepted, decisions);
+    return ordered(immutableRequests, decisions);
   }
 
-  private Optional<DecisionReason> boundaryFailure(
-      ScopedPermissionRequest request, ScopeRef activeScope) {
-    Optional<ScopeRef> resolvedObjectScope;
+  private List<ScopedPermissionRequest> evaluateScopeEntry(
+      List<ScopedPermissionRequest> requests,
+      Map<ScopedPermissionRequest, ScopedPermissionDecision> decisions) {
+    List<CheckRequest> checks =
+        requests.stream()
+            .map(
+                request ->
+                    new CheckRequest(
+                        request.activeScope().orElseThrow().scope().toObjectRef(),
+                        scopeEntryPermission,
+                        request.subject(),
+                        request.attributes()))
+            .toList();
+    List<CheckDecision> results = evaluator.bulkCheck(checks);
+    List<ScopedPermissionRequest> entered = new ArrayList<>();
+    for (int index = 0; index < requests.size(); index++) {
+      ScopedPermissionRequest request = requests.get(index);
+      CheckDecision result = results.get(index);
+      if (result.allowed()) {
+        entered.add(request);
+      } else {
+        decisions.put(
+            request,
+            denied(request, ScopeAuthorizationPhase.SCOPE_ENTRY, result.reason()));
+      }
+    }
+    return entered;
+  }
+
+  private void resolveCrossScope(
+      Map<ScopedPermissionRequest, CrossScopeAccessRequest> requests,
+      List<ScopedPermissionRequest> accepted,
+      Map<ScopedPermissionRequest, ScopedPermissionDecision> decisions) {
+    if (requests.isEmpty()) {
+      return;
+    }
+    List<CrossScopeAccessRequest> lookups = requests.values().stream().distinct().toList();
+    Map<CrossScopeAccessRequest, Boolean> grants;
     try {
-      resolvedObjectScope = objectScopeResolver.resolve(request.object());
+      grants = crossScopeGrants.resolve(lookups);
     } catch (RuntimeException exception) {
-      return Optional.of(DecisionReason.RESOLVER_FAILURE);
+      failAll(
+          requests.keySet(),
+          decisions,
+          ScopeAuthorizationPhase.CROSS_SCOPE_GRANT,
+          DecisionReason.RESOLVER_FAILURE);
+      return;
     }
-    if (resolvedObjectScope == null) {
-      return Optional.of(DecisionReason.RESOLVER_FAILURE);
+    if (!complete(lookups, grants)) {
+      failAll(
+          requests.keySet(),
+          decisions,
+          ScopeAuthorizationPhase.CROSS_SCOPE_GRANT,
+          DecisionReason.RESOLVER_FAILURE);
+      return;
     }
-    if (resolvedObjectScope.isEmpty()) {
-      return Optional.of(DecisionReason.NO_MATCH);
-    }
-    ScopeRef objectScope = resolvedObjectScope.orElseThrow();
-    if (activeScope.equals(objectScope)) {
-      return Optional.empty();
-    }
-    CrossScopeAccessRequest crossScopeRequest =
-        new CrossScopeAccessRequest(
-            activeScope,
-            objectScope,
-            request.object(),
-            request.permission(),
-            request.subject(),
-            request.attributes());
-    try {
-      return crossScopeAccessResolver.allows(crossScopeRequest)
-          ? Optional.empty()
-          : Optional.of(DecisionReason.NO_MATCH);
-    } catch (RuntimeException exception) {
-      return Optional.of(DecisionReason.RESOLVER_FAILURE);
+    requests.forEach(
+        (request, lookup) -> {
+          if (grants.get(lookup)) {
+            accepted.add(request);
+          } else {
+            decisions.put(
+                request,
+                denied(
+                    request,
+                    ScopeAuthorizationPhase.CROSS_SCOPE_GRANT,
+                    DecisionReason.NO_MATCH));
+          }
+        });
+  }
+
+  private void evaluateObjectPermissions(
+      List<ScopedPermissionRequest> requests,
+      Map<ScopedPermissionRequest, ScopedPermissionDecision> decisions) {
+    List<CheckDecision> results =
+        evaluator.bulkCheck(
+            requests.stream().map(ScopedAuthorizationService::objectCheck).toList());
+    for (int index = 0; index < requests.size(); index++) {
+      ScopedPermissionRequest request = requests.get(index);
+      decisions.put(
+          request,
+          new ScopedPermissionDecision(
+              request, ScopeAuthorizationPhase.OBJECT_PERMISSION, results.get(index)));
     }
   }
 
-  private static CheckRequest objectCheckRequest(ScopedPermissionRequest request) {
+  private static <K, V> boolean complete(List<K> requests, Map<K, V> resolved) {
+    return resolved != null
+        && resolved.size() == Set.copyOf(requests).size()
+        && resolved.keySet().equals(Set.copyOf(requests))
+        && resolved.values().stream().allMatch(Objects::nonNull);
+  }
+
+  private static void failAll(
+      Iterable<ScopedPermissionRequest> requests,
+      Map<ScopedPermissionRequest, ScopedPermissionDecision> decisions,
+      ScopeAuthorizationPhase phase,
+      DecisionReason reason) {
+    requests.forEach(request -> decisions.put(request, denied(request, phase, reason)));
+  }
+
+  private static List<ScopedPermissionDecision> ordered(
+      List<ScopedPermissionRequest> requests,
+      Map<ScopedPermissionRequest, ScopedPermissionDecision> decisions) {
+    return requests.stream().map(decisions::get).toList();
+  }
+
+  private static CheckRequest objectCheck(ScopedPermissionRequest request) {
     return new CheckRequest(
         request.object(), request.permission(), request.subject(), request.attributes());
   }
 
   private static ScopedPermissionDecision denied(
-      ScopedPermissionRequest request, CheckRequest checkRequest, DecisionReason reason) {
+      ScopedPermissionRequest request, ScopeAuthorizationPhase phase, DecisionReason reason) {
     return new ScopedPermissionDecision(
-        request, new CheckDecision(checkRequest, false, reason));
+        request, phase, new CheckDecision(objectCheck(request), false, reason));
   }
 }

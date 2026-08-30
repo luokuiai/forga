@@ -1,7 +1,6 @@
 package com.luokuiai.forga.core.policy;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
@@ -32,14 +31,8 @@ class PolicyCompilerTest {
     PolicyDefinition reordered =
         new PolicyDefinition(new LinkedHashMap<>(first.permissions()));
 
-    ResolverCapabilities capabilities =
-        ResolverCapabilities.of(
-            List.of(
-                new RelationRef("viewer"), new RelationRef("parent"), new RelationRef("owner")),
-            List.of(new CaveatRef("active")));
-
-    CompiledPolicy compiled = PolicyCompiler.compile(first, capabilities);
-    CompiledPolicy compiledAgain = PolicyCompiler.compile(reordered, capabilities);
+    CompiledPolicy compiled = PolicyCompiler.compile(first);
+    CompiledPolicy compiledAgain = PolicyCompiler.compile(reordered);
 
     assertThat(compiled.definition()).isEqualTo(first);
     assertThat(compiled.fingerprint()).startsWith("sha256:");
@@ -58,31 +51,24 @@ class PolicyCompilerTest {
     second.put(new PermissionRef("edit"), editor);
     second.put(new PermissionRef("view"), viewer);
 
-    ResolverCapabilities capabilities =
-        ResolverCapabilities.of(
-            List.of(new RelationRef("viewer"), new RelationRef("editor")), List.of());
-
-    assertThat(PolicyCompiler.compile(new PolicyDefinition(first), capabilities).fingerprint())
+    assertThat(PolicyCompiler.compile(new PolicyDefinition(first)).fingerprint())
         .isEqualTo(
-            PolicyCompiler.compile(new PolicyDefinition(second), capabilities).fingerprint());
+            PolicyCompiler.compile(new PolicyDefinition(second)).fingerprint());
   }
 
   @Test
-  void rejectsMissingRelationCapability() {
+  void compilesWithoutRuntimeRelationRegistrations() {
     PolicyDefinition definition =
         new PolicyDefinition(
             Map.of(
                 new PermissionRef("view"),
                 PermissionExpression.relation(new RelationRef("viewer"))));
 
-    assertThatExceptionOfType(PolicyValidationException.class)
-        .isThrownBy(
-            () -> PolicyCompiler.compile(definition, ResolverCapabilities.of(List.of(), List.of())))
-        .withMessageContaining("unsupported relation");
+    assertThat(PolicyCompiler.compile(definition).definition()).isEqualTo(definition);
   }
 
   @Test
-  void rejectsMissingCaveatCapability() {
+  void compilesWithoutRuntimeCaveatRegistrations() {
     PolicyDefinition definition =
         new PolicyDefinition(
             Map.of(
@@ -91,12 +77,32 @@ class PolicyCompilerTest {
                     PermissionExpression.relation(new RelationRef("viewer")),
                     new CaveatRef("active"))));
 
-    ResolverCapabilities capabilities =
-        ResolverCapabilities.of(List.of(new RelationRef("viewer")), List.of());
+    assertThat(PolicyCompiler.compile(definition).definition()).isEqualTo(definition);
+  }
 
-    assertThatExceptionOfType(PolicyValidationException.class)
-        .isThrownBy(() -> PolicyCompiler.compile(definition, capabilities))
-        .withMessageContaining("unsupported caveat");
+  @Test
+  void discoversRuntimeRequirementsFromCompiledPolicy() {
+    RelationRef viewer = new RelationRef("viewer");
+    RelationRef parent = new RelationRef("parent");
+    CaveatRef active = new CaveatRef("active");
+    CompiledPolicy policy =
+        PolicyCompiler.compile(
+            new PolicyDefinition(
+                Map.of(
+                    new PermissionRef("view"),
+                    PermissionExpression.union(
+                        List.of(
+                            PermissionExpression.grant(),
+                            PermissionExpression.traversal(
+                                parent,
+                                PermissionExpression.caveat(
+                                    PermissionExpression.relation(viewer), active)))))));
+
+    PolicyRequirements requirements = PolicyRequirements.from(policy);
+
+    assertThat(requirements.relations()).containsExactlyInAnyOrder(parent, viewer);
+    assertThat(requirements.caveats()).containsExactly(active);
+    assertThat(requirements.grantLookupRequired()).isTrue();
   }
 
   @Test
@@ -106,14 +112,6 @@ class PolicyCompilerTest {
 
   @Test
   void rejectsNullCompileInputs() {
-    ResolverCapabilities capabilities = ResolverCapabilities.of(List.of(), List.of());
-    PolicyDefinition definition =
-        new PolicyDefinition(
-            Map.of(
-                new PermissionRef("view"),
-                PermissionExpression.relation(new RelationRef("viewer"))));
-
-    assertThatNullPointerException().isThrownBy(() -> PolicyCompiler.compile(null, capabilities));
-    assertThatNullPointerException().isThrownBy(() -> PolicyCompiler.compile(definition, null));
+    assertThatNullPointerException().isThrownBy(() -> PolicyCompiler.compile(null));
   }
 }

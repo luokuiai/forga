@@ -8,6 +8,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.luokuiai.forga.core.eval.CheckRequest;
 import com.luokuiai.forga.core.eval.AuthorizationEvaluator;
+import com.luokuiai.forga.core.eval.EvaluationReadContext;
 import com.luokuiai.forga.core.eval.PermissionGrantLookup;
 import com.luokuiai.forga.core.model.AttributeRef;
 import com.luokuiai.forga.core.model.ObjectRef;
@@ -20,6 +21,7 @@ import com.luokuiai.forga.query.PredicateConstraint;
 import com.luokuiai.forga.query.QueryParameter;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -128,11 +130,14 @@ class ForgaSpringBootExampleApplicationTest {
             unassigned,
             attributes(ExampleAuthorizationDataStore.HOME_TENANT));
 
-    var resolved = grants.resolve(List.of(granted, denied));
+    var resolved =
+        grants.resolve(
+            List.of(granted, denied),
+            new EvaluationReadContext(Optional.empty(), Optional.empty()));
 
-    assertThat(resolved).containsOnlyKeys(granted, denied);
-    assertThat(resolved.get(granted).granted()).isTrue();
-    assertThat(resolved.get(denied).granted()).isFalse();
+    assertThat(resolved.values()).containsOnlyKeys(granted, denied);
+    assertThat(resolved.values().get(granted)).isTrue();
+    assertThat(resolved.values().get(denied)).isFalse();
   }
 
   @Test
@@ -228,9 +233,12 @@ class ForgaSpringBootExampleApplicationTest {
             ExampleAuthorizationConfiguration.CAROL,
             attributes(ExampleAuthorizationDataStore.TARGET_TENANT));
 
-    var isolated = grants.resolve(List.of(membershipInHomeTenant, userInTargetTenant));
+    var isolated =
+        grants.resolve(
+            List.of(membershipInHomeTenant, userInTargetTenant),
+            new EvaluationReadContext(Optional.empty(), Optional.empty()));
 
-    assertThat(isolated.values()).allMatch(result -> !result.granted());
+    assertThat(isolated.values().values()).allMatch(result -> !result);
   }
 
   @Test

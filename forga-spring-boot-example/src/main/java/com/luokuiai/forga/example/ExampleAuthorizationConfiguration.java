@@ -2,8 +2,8 @@ package com.luokuiai.forga.example;
 
 import com.luokuiai.forga.core.context.AuthenticatedSubjectProvider;
 import com.luokuiai.forga.core.context.AuthorizationAttributesProvider;
+import com.luokuiai.forga.core.eval.BatchResolution;
 import com.luokuiai.forga.core.eval.PermissionGrantLookup;
-import com.luokuiai.forga.core.eval.PermissionGrantResult;
 import com.luokuiai.forga.core.model.AttributeRef;
 import com.luokuiai.forga.core.model.ObjectRef;
 import com.luokuiai.forga.core.model.PermissionRef;
@@ -13,7 +13,6 @@ import com.luokuiai.forga.core.policy.CompiledPolicy;
 import com.luokuiai.forga.core.policy.PermissionExpression;
 import com.luokuiai.forga.core.policy.PolicyCompiler;
 import com.luokuiai.forga.core.policy.PolicyDefinition;
-import com.luokuiai.forga.core.policy.ResolverCapabilities;
 import com.luokuiai.forga.mybatis.MyBatisAuthorizationBoundary;
 import com.luokuiai.forga.mybatis.MyBatisAuthorizationBoundaryResolver;
 import com.luokuiai.forga.mybatis.MyBatisAuthorizationException;
@@ -28,9 +27,8 @@ import com.luokuiai.forga.resolver.ForwardRelationshipBatchRequest;
 import com.luokuiai.forga.resolver.ForwardRelationshipBatchResponse;
 import com.luokuiai.forga.resolver.ForwardRelationshipRequest;
 import com.luokuiai.forga.resolver.ForwardRelationshipResponse;
-import com.luokuiai.forga.resolver.RelationshipResolver;
+import com.luokuiai.forga.resolver.ForwardRelationshipResolver;
 import com.luokuiai.forga.resolver.RelationshipSubject;
-import com.luokuiai.forga.resolver.ResolverDescriptor;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -89,8 +87,7 @@ class ExampleAuthorizationConfiguration {
                         PermissionExpression.grant())),
                 ENTER_DEPARTMENT,
                 PermissionExpression.relation(APPOINTED)));
-    return PolicyCompiler.compile(
-        definition, ResolverCapabilities.of(List.of(VIEWER, APPOINTED), List.of()));
+    return PolicyCompiler.compile(definition);
   }
 
   @Bean
@@ -100,14 +97,14 @@ class ExampleAuthorizationConfiguration {
 
   @Bean
   PermissionGrantLookup rolePermissionSnapshot(ExampleAuthorizationDataStore dataStore) {
-    return requests -> {
+    return (requests, context) -> {
       ExampleAuthorizationDataStore.Snapshot snapshot = dataStore.snapshot();
-      return requests.stream()
-          .collect(
-              java.util.stream.Collectors.toUnmodifiableMap(
-                  request -> request,
-                  request ->
-                      new PermissionGrantResult(
+      return BatchResolution.unversioned(
+          requests.stream()
+              .collect(
+                  java.util.stream.Collectors.toUnmodifiableMap(
+                      request -> request,
+                      request ->
                           attribute(request.attributes(), EFFECTIVE_TENANT_ID)
                               .map(
                                   tenantId ->
@@ -151,7 +148,7 @@ class ExampleAuthorizationConfiguration {
   }
 
   @Bean
-  RelationshipResolver exampleRelationships(ExampleAuthorizationDataStore dataStore) {
+  ForwardRelationshipResolver exampleRelationships(ExampleAuthorizationDataStore dataStore) {
     return new InMemoryBusinessRelationshipResolver(dataStore);
   }
 
@@ -191,11 +188,7 @@ class ExampleAuthorizationConfiguration {
   }
 
   private static final class InMemoryBusinessRelationshipResolver
-      implements RelationshipResolver {
-
-    private static final ResolverDescriptor DESCRIPTOR =
-        new ResolverDescriptor(
-            "example-business-relations", Set.of(VIEWER, APPOINTED), Set.of(), Set.of());
+      implements ForwardRelationshipResolver {
 
     private final ExampleAuthorizationDataStore dataStore;
 
@@ -204,8 +197,13 @@ class ExampleAuthorizationConfiguration {
     }
 
     @Override
-    public ResolverDescriptor descriptor() {
-      return DESCRIPTOR;
+    public String name() {
+      return "example-business-relations";
+    }
+
+    @Override
+    public Set<RelationRef> forwardRelations() {
+      return Set.of(VIEWER, APPOINTED);
     }
 
     @Override

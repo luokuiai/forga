@@ -3,15 +3,16 @@ package com.luokuiai.forga.resolver;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatExceptionOfType;
 
+import com.luokuiai.forga.core.eval.BatchResolution;
 import com.luokuiai.forga.core.eval.DecisionReason;
 import com.luokuiai.forga.core.eval.DirectReverseLookupSubject;
+import com.luokuiai.forga.core.eval.EvaluationReadContext;
 import com.luokuiai.forga.core.eval.ListObjectsCursor;
 import com.luokuiai.forga.core.eval.ObjectListingPage;
 import com.luokuiai.forga.core.eval.RelationLookupRequest;
 import com.luokuiai.forga.core.eval.RelationshipEntry;
 import com.luokuiai.forga.core.eval.RelationshipLookupException;
 import com.luokuiai.forga.core.eval.ReverseRelationLookupRequest;
-import com.luokuiai.forga.core.model.AttributeRef;
 import com.luokuiai.forga.core.model.ConsistencyToken;
 import com.luokuiai.forga.core.model.ObjectRef;
 import com.luokuiai.forga.core.model.RelationRef;
@@ -74,8 +75,11 @@ class ResolverRegistryLookupTest {
     RelationLookupRequest editor =
         new RelationLookupRequest(new ObjectRef("document", "two"), EDITOR);
 
-    Map<RelationLookupRequest, List<RelationshipEntry>> result =
-        lookup.resolve(List.of(viewer, editor, viewer), Optional.of(deadline));
+    BatchResolution<RelationLookupRequest, List<RelationshipEntry>> batch =
+        lookup.resolve(
+            List.of(viewer, editor, viewer),
+            new EvaluationReadContext(Optional.empty(), Optional.of(deadline)));
+    Map<RelationLookupRequest, List<RelationshipEntry>> result = batch.values();
 
     assertThat(viewerResolver.forwardCalls).isOne();
     assertThat(editorResolver.forwardCalls).isOne();
@@ -144,7 +148,11 @@ class ResolverRegistryLookupTest {
         new RelationLookupRequest(new ObjectRef("document", "one"), VIEWER);
 
     assertThatExceptionOfType(RelationshipLookupException.class)
-        .isThrownBy(() -> lookup.resolve(List.of(request)))
+        .isThrownBy(
+            () ->
+                lookup.resolve(
+                    List.of(request),
+                    new EvaluationReadContext(Optional.empty(), Optional.empty())))
         .satisfies(
             exception -> assertThat(exception.reason()).isEqualTo(DecisionReason.RESOLVER_FAILURE))
         .withMessageContaining("missing forward resolver");
@@ -165,7 +173,11 @@ class ResolverRegistryLookupTest {
         new RelationLookupRequest(new ObjectRef("document", "one"), VIEWER);
 
     assertThatExceptionOfType(RelationshipLookupException.class)
-        .isThrownBy(() -> lookup.resolve(List.of(request)))
+        .isThrownBy(
+            () ->
+                lookup.resolve(
+                    List.of(request),
+                    new EvaluationReadContext(Optional.empty(), Optional.empty())))
         .satisfies(
             exception -> assertThat(exception.reason()).isEqualTo(DecisionReason.RESOLVER_FAILURE))
         .withMessageContaining("forward resolver failed");
@@ -192,15 +204,106 @@ class ResolverRegistryLookupTest {
         new ResolverRegistryRelationshipLookup(new ResolverRegistry(List.of(resolver)));
 
     assertThatExceptionOfType(RelationshipLookupException.class)
-        .isThrownBy(() -> lookup.resolve(List.of(request)))
+        .isThrownBy(
+            () ->
+                lookup.resolve(
+                    List.of(request),
+                    new EvaluationReadContext(Optional.empty(), Optional.empty())))
         .satisfies(
             exception -> assertThat(exception.reason()).isEqualTo(DecisionReason.RESOLVER_FAILURE))
         .withMessageContaining("unexpected response");
   }
 
-  private static final class TestResolver implements RelationshipResolver {
+  @Test
+  void forwardLookupPropagatesEstablishedConsistencyAcrossResolvers() {
+    ConsistencyToken token = new ConsistencyToken("revision-9");
+    TestResolver viewerResolver =
+        new TestResolver(
+            "viewer-resolver",
+            Set.of(VIEWER),
+            Set.of(),
+            batch ->
+                new ForwardRelationshipBatchResponse(
+                    batch.requests().stream()
+                        .map(
+                            request ->
+                                new ForwardRelationshipResponse(
+                                    request, List.of(), ConsistencyContext.of(token)))
+                        .toList()),
+            ignored -> null);
+    TestResolver editorResolver =
+        new TestResolver(
+            "editor-resolver",
+            Set.of(EDITOR),
+            Set.of(),
+            batch -> {
+              assertThat(batch.requests().get(0).context().consistency().token()).contains(token);
+              return new ForwardRelationshipBatchResponse(
+                  batch.requests().stream()
+                      .map(
+                          request ->
+                              new ForwardRelationshipResponse(
+                                  request, List.of(), ConsistencyContext.empty()))
+                      .toList());
+            },
+            ignored -> null);
+    ResolverRegistryRelationshipLookup lookup =
+        new ResolverRegistryRelationshipLookup(
+            new ResolverRegistry(List.of(viewerResolver, editorResolver)));
 
-    private final ResolverDescriptor descriptor;
+    var resolved =
+        lookup.resolve(
+            List.of(
+                new RelationLookupRequest(new ObjectRef("document", "one"), VIEWER),
+                new RelationLookupRequest(new ObjectRef("document", "two"), EDITOR)),
+            new EvaluationReadContext(Optional.empty(), Optional.empty()));
+
+    assertThat(resolved.consistency()).contains(token);
+  }
+
+  @Test
+  void forwardLookupRejectsConflictingResolverConsistency() {
+    ConsistencyToken requested = new ConsistencyToken("revision-9");
+    ConsistencyToken returned = new ConsistencyToken("revision-10");
+    TestResolver resolver =
+        new TestResolver(
+            "viewer-resolver",
+            Set.of(VIEWER),
+            Set.of(),
+            batch ->
+                new ForwardRelationshipBatchResponse(
+                    batch.requests().stream()
+                        .map(
+                            request ->
+                                new ForwardRelationshipResponse(
+                                    request, List.of(), ConsistencyContext.of(returned)))
+                        .toList()),
+            ignored -> null);
+    ResolverRegistryRelationshipLookup lookup =
+        new ResolverRegistryRelationshipLookup(new ResolverRegistry(List.of(resolver)));
+    RelationLookupRequest request =
+        new RelationLookupRequest(new ObjectRef("document", "one"), VIEWER);
+
+    assertThatExceptionOfType(RelationshipLookupException.class)
+        .isThrownBy(
+            () ->
+                lookup.resolve(
+                    List.of(request),
+                    new EvaluationReadContext(
+                        Optional.of(requested), Optional.empty())))
+        .satisfies(
+            exception ->
+                assertThat(exception.reason()).isEqualTo(DecisionReason.CONSISTENCY_CONFLICT));
+  }
+
+  private static final class TestResolver
+      implements ForwardRelationshipResolver, ReverseRelationshipResolver {
+
+    private final String name;
+
+    private final Set<RelationRef> forwardRelations;
+
+    private final Set<RelationRef> reverseRelations;
 
     private final Function<ForwardRelationshipBatchRequest, ForwardRelationshipBatchResponse>
         forward;
@@ -222,16 +325,26 @@ class ResolverRegistryLookupTest {
         Set<RelationRef> reverseRelations,
         Function<ForwardRelationshipBatchRequest, ForwardRelationshipBatchResponse> forward,
         Function<ReverseRelationshipBatchRequest, ReverseRelationshipBatchResponse> reverse) {
-      descriptor =
-          new ResolverDescriptor(
-              name, forwardRelations, reverseRelations, Set.<AttributeRef>of());
+      this.name = name;
+      this.forwardRelations = Set.copyOf(forwardRelations);
+      this.reverseRelations = Set.copyOf(reverseRelations);
       this.forward = forward;
       this.reverse = reverse;
     }
 
     @Override
-    public ResolverDescriptor descriptor() {
-      return descriptor;
+    public String name() {
+      return name;
+    }
+
+    @Override
+    public Set<RelationRef> forwardRelations() {
+      return forwardRelations;
+    }
+
+    @Override
+    public Set<RelationRef> reverseRelations() {
+      return reverseRelations;
     }
 
     @Override
@@ -248,12 +361,6 @@ class ResolverRegistryLookupTest {
       reverseCalls++;
       lastReverseRequest = request.requests().get(0);
       return reverse.apply(request);
-    }
-
-    @Override
-    public AttributeResolutionBatchResponse resolveAttributes(
-        AttributeResolutionBatchRequest request) {
-      return null;
     }
   }
 }

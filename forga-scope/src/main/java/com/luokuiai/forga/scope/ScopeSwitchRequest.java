@@ -1,6 +1,5 @@
 package com.luokuiai.forga.scope;
 
-import com.luokuiai.forga.core.model.PermissionRef;
 import com.luokuiai.forga.core.model.SubjectRef;
 import java.util.Map;
 
@@ -9,13 +8,11 @@ import java.util.Map;
  *
  * @param subject subject requesting the switch
  * @param targetScope target scope
- * @param permission permission that represents scope entry
  * @param attributes request-scoped attributes
  */
 public record ScopeSwitchRequest(
     SubjectRef subject,
     ScopeRef targetScope,
-    PermissionRef permission,
     Map<com.luokuiai.forga.core.model.AttributeRef, String> attributes) {
 
   /**
@@ -23,11 +20,9 @@ public record ScopeSwitchRequest(
    *
    * @param subject subject requesting the switch
    * @param targetScope target scope
-   * @param permission permission that represents scope entry
    */
-  public ScopeSwitchRequest(
-      SubjectRef subject, ScopeRef targetScope, PermissionRef permission) {
-    this(subject, targetScope, permission, Map.of());
+  public ScopeSwitchRequest(SubjectRef subject, ScopeRef targetScope) {
+    this(subject, targetScope, Map.of());
   }
 
   /**
@@ -35,7 +30,6 @@ public record ScopeSwitchRequest(
    *
    * @param subject subject requesting the switch
    * @param targetScope target scope
-   * @param permission permission that represents scope entry
    * @param attributes request-scoped attributes
    */
   public ScopeSwitchRequest {
@@ -44,9 +38,6 @@ public record ScopeSwitchRequest(
     }
     if (targetScope == null) {
       throw new IllegalArgumentException("target scope is required");
-    }
-    if (permission == null) {
-      throw new IllegalArgumentException("permission is required");
     }
     attributes = Map.copyOf(attributes);
   }

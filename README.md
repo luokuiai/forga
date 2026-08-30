@@ -109,8 +109,7 @@ PermissionRef view = new PermissionRef("view");
 
 CompiledPolicy policy =
     PolicyCompiler.compile(
-        new PolicyDefinition(Map.of(view, PermissionExpression.relation(viewer))),
-        ResolverCapabilities.of(List.of(viewer), List.of()));
+        new PolicyDefinition(Map.of(view, PermissionExpression.relation(viewer))));
 ```
 
 Create an evaluator with a host resolver:
@@ -154,11 +153,15 @@ authorized rowset instead of either form of per-row authorization.
 Applications expose existing authorization data through resolver contracts. A resolver can read
 from any host-owned table, cache, service, or graph, but it returns neutral Forga references.
 
-`forga-core` provides higher-level resolver contracts:
+`forga-core` provides independent resolver contracts. A host adapter implements only the operations
+it owns and may implement several on one named class:
 
 ```java
-RelationshipResolver resolver = ...;
-ResolverRegistry registry = new ResolverRegistry(List.of(resolver));
+ForwardRelationshipResolver relationships = ...;
+ReverseRelationshipResolver reverseRelationships = ...;
+AttributeResolver attributes = ...;
+ResolverRegistry registry =
+    new ResolverRegistry(List.of(relationships, reverseRelationships, attributes));
 ```
 
 `forga-core` evaluates against lower-level lookup contracts:
@@ -175,20 +178,22 @@ RelationshipLookup relationshipLookup =
     new ResolverRegistryRelationshipLookup(registry);
 ObjectListingLookup objectListingLookup =
     new ResolverRegistryObjectListingLookup(registry);
+AttributeLookup attributeLookup =
+    new ResolverRegistryAttributeLookup(registry);
 ```
 
 Forward resolution powers `check` and `bulkCheck`. Reverse resolution powers `listObjects`.
-Hosts supply request attributes to caveat evaluation and MyBatis query mappings through the
-corresponding provider contracts. The evaluator does not perform implicit attribute lookups.
-Resolvers that declare only forward capabilities implement only `descriptor()` and
-`resolveForward()`; undeclared reverse and attribute operations have complete empty defaults.
+Request attributes remain caller-scoped input. Caveats separately declare resolver-owned object
+attributes, which the evaluator loads in bounded batches for the current object, including objects
+reached through traversal and bounded `listObjects` candidates. A forward-only resolver implements
+only `name()`, `forwardRelations()`, and `resolveForward()`.
 
 Forga does not require a Forga-owned relationship table. Hosts may store relationships in their own
 schema, derive them from business tables, or resolve them from external services.
 
 ### Batch Lookup Contract
 
-`PermissionGrantLookup` and every `RelationshipResolver` operation receive batches so host adapters
+`PermissionGrantLookup` and every specialized resolver operation receive batches so host adapters
 can avoid N+1 queries. A correct database-backed implementation should:
 
 1. Read one request-consistent snapshot or cache version for the batch.
@@ -220,21 +225,24 @@ list of every authorized user:
 ```java
 CompiledPolicy policy =
     PolicyCompiler.compile(
-        new PolicyDefinition(Map.of(view, PermissionExpression.grant())),
-        ResolverCapabilities.of(List.of(), List.of()));
+        new PolicyDefinition(Map.of(view, PermissionExpression.grant())));
 
 PermissionGrantLookup grants =
-    requests ->
-        requests.stream()
-            .collect(Collectors.toUnmodifiableMap(
-                request -> request,
-                request -> new PermissionGrantResult(
-                    hostSnapshots.resolve(request.subject())
-                        .contains(request.permission()))));
+    (requests, context) -> {
+      HostSnapshot snapshot = hostSnapshots.resolve(context.consistency());
+      return new BatchResolution<>(
+          requests.stream()
+              .collect(Collectors.toUnmodifiableMap(
+                  request -> request,
+                  request -> snapshot.permissions(request.subject())
+                      .contains(request.permission()))),
+          Optional.of(snapshot.consistencyToken()));
+    };
 ```
 
-The lookup receives complete subject, object, permission, and request attributes in bounded batches.
-It can reuse a versioned host cache and return an opaque `ConsistencyToken`. Role assignments,
+The lookup receives complete subject, object, permission, request attributes, current consistency,
+and deadline in bounded batches. It can reuse a versioned host cache and return one opaque
+`ConsistencyToken` for the complete batch. Role assignments,
 permission tables, snapshot invalidation, and cache storage remain host-owned. A grant leaf can be
 combined with relations and caveats, for example `grant() OR relation(owner)`. Grant leaves are
 check-only; object listing still requires reverse relationship resolution or a set-oriented query.
@@ -347,9 +355,10 @@ The scope package provides:
 - `ScopedSubject`: subject plus optional active scope.
 - `ActingScopeContext`: original subject, acting subject, and active scope.
 - `ScopeSwitchRequest` / `ScopeSwitchDecision`: check whether a subject can enter a scope.
-- `ScopedPermissionRequest` / `ScopedPermissionDecision`: check a permission under active scope.
-- `ObjectScopeResolver`: resolve the host-owned scope containing a protected object.
-- `CrossScopeAccessResolver`: prove an explicit grant when active and object scopes differ.
+- `ScopedPermissionRequest` / `ScopedPermissionDecision`: check a permission and identify its scope
+  authorization phase.
+- `ObjectScopeLookup`: batch-resolve the host-owned scopes containing protected objects.
+- `CrossScopeGrantLookup`: batch-prove explicit grants when active and object scopes differ.
 - `ScopePolicyTemplates`: `member`, `assigned`, `denied`, and `enter` policy helpers.
 - `ScopeQueryConstraints`: parameterized active-scope and active-or-granted list predicates.
 
@@ -389,8 +398,7 @@ selected `ActiveScope`.
 Scope switch example:
 
 ```java
-ObjectScopeResolver objectScopes =
-    object -> Optional.of(new ScopeRef("workspace", hostObjects.scopeId(object)));
+ObjectScopeLookup objectScopes = hostObjects::resolveScopes;
 ScopedAuthorizationService switchService =
     new ScopedAuthorizationService(evaluator, objectScopes);
 
@@ -398,18 +406,16 @@ ScopeSwitchDecision decision =
     switchService.canSwitch(
         new ScopeSwitchRequest(
             new SubjectRef("user", "alice"),
-            new ScopeRef("workspace", "beta"),
-            ScopePolicyTemplates.ENTER));
+            new ScopeRef("workspace", "beta")));
 ```
 
 Scoped permission example:
 
 ```java
-ObjectScopeResolver objectScopes =
-    object -> Optional.of(new ScopeRef("workspace", hostObjects.scopeId(object)));
-CrossScopeAccessResolver crossScopeAccess = hostGrants::allows;
+ObjectScopeLookup objectScopes = hostObjects::resolveScopes;
+CrossScopeGrantLookup crossScopeGrants = hostGrants::resolveBatch;
 ScopedAuthorizationService service =
-    new ScopedAuthorizationService(evaluator, objectScopes, crossScopeAccess);
+    new ScopedAuthorizationService(evaluator, objectScopes, crossScopeGrants);
 
 ScopedPermissionDecision decision =
     service.check(
@@ -424,13 +430,13 @@ ScopedPermissionDecision decision =
 Strict construction first verifies that the subject can enter the active scope, resolves the
 object's owning scope, requires an explicit host grant when the scopes differ, and only then
 evaluates the requested object permission. Missing ownership, denied grants, and resolver failures
-fail closed. The older constructors remain available for compatibility but do not bind objects to
-the active scope; hosts using them must enforce that boundary themselves.
+fail closed. `bulkCheck` applies the same stages to bounded request batches without issuing one
+ownership, grant, or evaluator call per object.
 
 For list queries that include explicitly granted objects, compose a host-owned set-based grant
 predicate with `ScopeQueryConstraints.activeOrGranted(...)`. This is only the scope boundary
 fragment: verify scope entry first and combine it with the ordinary object-permission constraint.
-Keep the grant predicate consistent with `CrossScopeAccessResolver`; do not authorize a page by
+Keep the grant predicate consistent with `CrossScopeGrantLookup`; do not authorize a page by
 calling `check` once per row.
 
 Object ownership, cross-scope grants, and relationship resolution participating in one decision
@@ -588,17 +594,19 @@ An enabled Spring application can start before its authorization model is ready.
 This state is deliberately not represented by an allow-all evaluator. Any component that explicitly
 requires an `AuthorizationEvaluator` still fails Spring dependency validation.
 
-When the host provides one `CompiledPolicy` Bean and its `RelationshipResolver` Beans, the Starter
+When the host provides one `CompiledPolicy` Bean and its specialized `Resolver` Beans, the Starter
 automatically assembles:
 
 - `ResolverRegistry`
-- `RelationshipLookup` and `ObjectListingLookup`
+- `RelationshipLookup`, `ObjectListingLookup`, and `AttributeLookup`
 - `EvaluationLimits.defaults()`
 - `AuthorizationEvaluator`
 
-`PolicyDefinition` contains the host's permission expressions. `PolicyCompiler` validates those
-expressions against declared resolver capabilities and produces the runtime-ready `CompiledPolicy`.
-Because the policy and relationship data are business-owned, the Starter cannot invent these beans.
+`PolicyDefinition` contains the host's permission expressions. `PolicyCompiler` validates their
+structure and produces the immutable `CompiledPolicy`. The Starter derives required relations,
+caveats, attributes, and grants from that policy and validates them against actual registered runtime
+components, so the host does not maintain a duplicate capability list. Because policy and host data
+are business-owned, the Starter cannot invent these beans.
 An application may keep `@EnableForga` during incremental integration and add the policy later, or
 omit `@EnableForga` to disable all Forga runtime components.
 
@@ -614,7 +622,7 @@ restart with a newly compiled policy.
 
 - `@EnableForga` on the application composition root
 - a `CompiledPolicy` Bean defining `view_document = viewer OR grant()`
-- a forward-only `RelationshipResolver` Bean using the undeclared operation defaults
+- a forward-only `ForwardRelationshipResolver` Bean
 - a persistence-shaped, mutable host store for role assignments, permission grants, and data scopes
 - a batched `PermissionGrantLookup` reading one immutable host snapshot per invocation
 - a `MyBatisAuthorizationBoundaryResolver` translating effective data scopes to typed constraints

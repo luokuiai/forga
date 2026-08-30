@@ -13,7 +13,6 @@ import com.luokuiai.forga.core.policy.CompiledPolicy;
 import com.luokuiai.forga.core.policy.PermissionExpression;
 import com.luokuiai.forga.core.policy.PolicyCompiler;
 import com.luokuiai.forga.core.policy.PolicyDefinition;
-import com.luokuiai.forga.core.policy.ResolverCapabilities;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -21,6 +20,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
 import org.junit.jupiter.api.Test;
@@ -229,20 +229,15 @@ class AuthorizationEvaluatorTest {
     RelationshipLookup lookup =
         new RelationshipLookup() {
           @Override
-          public Map<RelationLookupRequest, List<RelationshipEntry>> resolve(
-              List<RelationLookupRequest> requests) {
-            return Map.of();
-          }
-
-          @Override
-          public Map<RelationLookupRequest, List<RelationshipEntry>> resolve(
-              List<RelationLookupRequest> requests, Optional<Instant> deadline) {
+          public BatchResolution<RelationLookupRequest, List<RelationshipEntry>> resolve(
+              List<RelationLookupRequest> requests, EvaluationReadContext context) {
             if (requests.size() > 1) {
               throw new IllegalStateException("batch lookup failed");
             }
-            deadlines.add(deadline.orElseThrow());
+            deadlines.add(context.deadline().orElseThrow());
             LockSupport.parkNanos(Duration.ofMillis(10).toNanos());
-            return Map.of(requests.get(0), List.of(RelationshipEntry.subject(ALICE)));
+            return BatchResolution.unversioned(
+                Map.of(requests.get(0), List.of(RelationshipEntry.subject(ALICE))));
           }
         };
     AuthorizationEvaluator evaluator =
@@ -267,7 +262,7 @@ class AuthorizationEvaluatorTest {
   void bulkCheckFallsBackAfterPrefetchResolverFailure() {
     AtomicInteger calls = new AtomicInteger();
     RelationshipLookup lookup =
-        requests -> {
+        (requests, context) -> {
           calls.incrementAndGet();
           if (requests.size() > 1) {
             throw new IllegalStateException("batch lookup failed");
@@ -275,7 +270,7 @@ class AuthorizationEvaluatorTest {
           Map<RelationLookupRequest, List<RelationshipEntry>> resolved = new HashMap<>();
           requests.forEach(
               request -> resolved.put(request, List.of(RelationshipEntry.subject(ALICE))));
-          return resolved;
+          return BatchResolution.unversioned(resolved);
         };
     ObjectRef secondDocument = new ObjectRef("document", "doc-2");
 
@@ -386,8 +381,8 @@ class AuthorizationEvaluatorTest {
             policy,
             lookup,
             EvaluationLimits.defaults(),
-            (caveat, request) ->
-                active.equals(caveat) && "active".equals(request.attributes().get(status)));
+            caveatEvaluator(
+                context -> "active".equals(context.request().attributes().get(status))));
 
     CheckDecision decision =
         evaluator.check(new CheckRequest(DOCUMENT, VIEW, ALICE, Map.of(status, "active")));
@@ -405,7 +400,7 @@ class AuthorizationEvaluatorTest {
                 PermissionExpression.relation(VIEWER), new CaveatRef("active")));
     AuthorizationEvaluator evaluator =
         new AuthorizationEvaluator(
-            policy, lookup, EvaluationLimits.defaults(), (caveat, request) -> false);
+            policy, lookup, EvaluationLimits.defaults(), caveatEvaluator(context -> false));
 
     CheckDecision decision = evaluator.check(request(VIEW));
 
@@ -553,7 +548,7 @@ class AuthorizationEvaluatorTest {
   @Test
   void failsClosedWhenResolverThrows() {
     RelationshipLookup lookup =
-        requests -> {
+        (requests, context) -> {
           throw new IllegalStateException("lookup failed");
         };
     CheckDecision decision = evaluator(relationPolicy(), lookup).check(request(VIEW));
@@ -565,7 +560,7 @@ class AuthorizationEvaluatorTest {
   @Test
   void failsClosedWhenResolverReportsConsistencyConflict() {
     RelationshipLookup lookup =
-        requests -> {
+        (requests, context) -> {
           throw new RelationshipLookupException(
               DecisionReason.CONSISTENCY_CONFLICT, "stale consistency token");
         };
@@ -589,11 +584,27 @@ class AuthorizationEvaluatorTest {
   }
 
   private static CompiledPolicy policy(PermissionExpression expression) {
-    return PolicyCompiler.compile(
-        new PolicyDefinition(Map.of(VIEW, expression)),
-        ResolverCapabilities.of(
-            List.of(VIEWER, EDITOR, BLOCKED, PARENT, MEMBER),
-            List.of(new CaveatRef("active"))));
+    return PolicyCompiler.compile(new PolicyDefinition(Map.of(VIEW, expression)));
+  }
+
+  private static CaveatEvaluator caveatEvaluator(
+      java.util.function.Predicate<CaveatEvaluationContext> predicate) {
+    return new CaveatEvaluator() {
+      @Override
+      public Set<CaveatRef> caveats() {
+        return Set.of(new CaveatRef("active"));
+      }
+
+      @Override
+      public Set<AttributeRef> requiredAttributes(CaveatRef caveat) {
+        return Set.of();
+      }
+
+      @Override
+      public boolean evaluate(CaveatRef caveat, CaveatEvaluationContext context) {
+        return predicate.test(context);
+      }
+    };
   }
 
   private static CheckRequest request(PermissionRef permission) {
@@ -625,13 +636,13 @@ class AuthorizationEvaluatorTest {
     }
 
     @Override
-    public Map<RelationLookupRequest, List<RelationshipEntry>> resolve(
-        List<RelationLookupRequest> requests) {
+    public BatchResolution<RelationLookupRequest, List<RelationshipEntry>> resolve(
+        List<RelationLookupRequest> requests, EvaluationReadContext context) {
       calls++;
       batchSizes.add(requests.size());
       Map<RelationLookupRequest, List<RelationshipEntry>> result = new HashMap<>();
       requests.forEach(request -> result.put(request, entries.getOrDefault(request, List.of())));
-      return result;
+      return BatchResolution.unversioned(result);
     }
   }
 
@@ -640,16 +651,11 @@ class AuthorizationEvaluatorTest {
     private final List<Instant> deadlines = new ArrayList<>();
 
     @Override
-    public Map<RelationLookupRequest, List<RelationshipEntry>> resolve(
-        List<RelationLookupRequest> requests) {
-      return Map.of();
-    }
-
-    @Override
-    public Map<RelationLookupRequest, List<RelationshipEntry>> resolve(
-        List<RelationLookupRequest> requests, Optional<Instant> deadline) {
-      deadlines.add(deadline.orElseThrow());
-      return Map.of(requests.get(0), List.of(RelationshipEntry.subject(ALICE)));
+    public BatchResolution<RelationLookupRequest, List<RelationshipEntry>> resolve(
+        List<RelationLookupRequest> requests, EvaluationReadContext context) {
+      deadlines.add(context.deadline().orElseThrow());
+      return BatchResolution.unversioned(
+          Map.of(requests.get(0), List.of(RelationshipEntry.subject(ALICE))));
     }
   }
 }

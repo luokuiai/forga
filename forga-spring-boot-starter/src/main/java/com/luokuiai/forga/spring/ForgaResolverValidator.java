@@ -1,17 +1,12 @@
 package com.luokuiai.forga.spring;
 
+import com.luokuiai.forga.core.eval.CaveatEvaluator;
+import com.luokuiai.forga.core.model.AttributeRef;
+import com.luokuiai.forga.core.model.CaveatRef;
 import com.luokuiai.forga.core.model.RelationRef;
-import com.luokuiai.forga.core.policy.CaveatExpression;
 import com.luokuiai.forga.core.policy.CompiledPolicy;
-import com.luokuiai.forga.core.policy.ExclusionExpression;
-import com.luokuiai.forga.core.policy.GrantExpression;
-import com.luokuiai.forga.core.policy.IntersectionExpression;
-import com.luokuiai.forga.core.policy.PermissionExpression;
-import com.luokuiai.forga.core.policy.RelationExpression;
-import com.luokuiai.forga.core.policy.TraversalExpression;
-import com.luokuiai.forga.core.policy.UnionExpression;
+import com.luokuiai.forga.core.policy.PolicyRequirements;
 import com.luokuiai.forga.resolver.ResolverRegistry;
-import java.util.LinkedHashSet;
 import java.util.Set;
 
 final class ForgaResolverValidator {
@@ -19,66 +14,50 @@ final class ForgaResolverValidator {
   private ForgaResolverValidator() {
   }
 
-  static void validateForwardCapabilities(CompiledPolicy policy, ResolverRegistry resolvers) {
-    for (RelationRef relation : relations(policy)) {
+  static void validateCheckCapabilities(
+      CompiledPolicy policy, ResolverRegistry resolvers, CaveatEvaluator caveats) {
+    PolicyRequirements requirements = PolicyRequirements.from(policy);
+    for (RelationRef relation : requirements.relations()) {
       if (resolvers.findForward(relation).isEmpty()) {
         throw new ForgaRuntimeException(
             "missing forward resolver for relation: " + relation.name());
       }
     }
+    for (CaveatRef caveat : requirements.caveats()) {
+      if (!supportedCaveats(caveats).contains(caveat)) {
+        throw new ForgaRuntimeException("missing caveat evaluator for: " + caveat.name());
+      }
+      for (AttributeRef attribute : requiredAttributes(caveats, caveat)) {
+        if (resolvers.findAttribute(attribute).isEmpty()) {
+          throw new ForgaRuntimeException(
+              "missing attribute resolver for caveat "
+                  + caveat.name()
+                  + ": "
+                  + attribute.name());
+        }
+      }
+    }
   }
 
   static boolean requiresGrantLookup(CompiledPolicy policy) {
-    return policy.definition().permissions().values().stream()
-        .anyMatch(ForgaResolverValidator::containsGrant);
+    return PolicyRequirements.from(policy).grantLookupRequired();
   }
 
-  private static Set<RelationRef> relations(CompiledPolicy policy) {
-    Set<RelationRef> relations = new LinkedHashSet<>();
-    policy.definition().permissions().values()
-        .forEach(expression -> collect(expression, relations));
-    return relations;
-  }
-
-  private static void collect(PermissionExpression expression, Set<RelationRef> relations) {
-    if (expression instanceof RelationExpression relationExpression) {
-      relations.add(relationExpression.relation());
-    } else if (expression instanceof UnionExpression unionExpression) {
-      unionExpression.expressions().forEach(branch -> collect(branch, relations));
-    } else if (expression instanceof IntersectionExpression intersectionExpression) {
-      intersectionExpression.expressions().forEach(branch -> collect(branch, relations));
-    } else if (expression instanceof ExclusionExpression exclusionExpression) {
-      collect(exclusionExpression.base(), relations);
-      collect(exclusionExpression.excluded(), relations);
-    } else if (expression instanceof TraversalExpression traversalExpression) {
-      relations.add(traversalExpression.relation());
-      collect(traversalExpression.expression(), relations);
-    } else if (expression instanceof CaveatExpression caveatExpression) {
-      collect(caveatExpression.expression(), relations);
+  private static Set<CaveatRef> supportedCaveats(CaveatEvaluator caveats) {
+    try {
+      return Set.copyOf(caveats.caveats());
+    } catch (RuntimeException exception) {
+      throw new ForgaRuntimeException("invalid caveat capability declaration");
     }
   }
 
-  private static boolean containsGrant(PermissionExpression expression) {
-    if (expression instanceof GrantExpression) {
-      return true;
+  private static Set<AttributeRef> requiredAttributes(
+      CaveatEvaluator caveats, CaveatRef caveat) {
+    try {
+      return Set.copyOf(caveats.requiredAttributes(caveat));
+    } catch (RuntimeException exception) {
+      throw new ForgaRuntimeException(
+          "invalid attribute requirements for caveat: " + caveat.name());
     }
-    if (expression instanceof UnionExpression unionExpression) {
-      return unionExpression.expressions().stream().anyMatch(ForgaResolverValidator::containsGrant);
-    }
-    if (expression instanceof IntersectionExpression intersectionExpression) {
-      return intersectionExpression.expressions().stream()
-          .anyMatch(ForgaResolverValidator::containsGrant);
-    }
-    if (expression instanceof ExclusionExpression exclusionExpression) {
-      return containsGrant(exclusionExpression.base())
-          || containsGrant(exclusionExpression.excluded());
-    }
-    if (expression instanceof TraversalExpression traversalExpression) {
-      return containsGrant(traversalExpression.expression());
-    }
-    if (expression instanceof CaveatExpression caveatExpression) {
-      return containsGrant(caveatExpression.expression());
-    }
-    return false;
   }
 }
