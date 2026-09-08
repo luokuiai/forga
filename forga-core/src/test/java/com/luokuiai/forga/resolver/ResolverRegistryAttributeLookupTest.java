@@ -31,34 +31,38 @@ class ResolverRegistryAttributeLookupTest {
   void groupsAttributesByOwnerAndMergesOneLogicalResult() {
     Instant deadline = Instant.now().plusSeconds(5);
     ConsistencyToken token = new ConsistencyToken("revision-3");
-    AtomicReference<AttributeResolutionRequest> secondRequest = new AtomicReference<>();
+    AtomicReference<AttributeResolutionRequest> statusRequest = new AtomicReference<>();
+    AtomicReference<AttributeResolutionRequest> classificationRequest = new AtomicReference<>();
     TestAttributeResolver statusResolver =
         new TestAttributeResolver(
             "status",
             Set.of(STATUS),
-            batch ->
-                new AttributeResolutionBatchResponse(
-                    batch.requests().stream()
-                        .map(
-                            request ->
-                                new AttributeResolutionResponse(
-                                    request,
-                                    List.of(new ResolvedAttribute(STATUS, "active")),
-                                    ConsistencyContext.of(token)))
-                        .toList()));
-    TestAttributeResolver classificationResolver =
-        new TestAttributeResolver(
-            "classification",
-            Set.of(CLASSIFICATION),
             batch -> {
-              secondRequest.set(batch.requests().get(0));
+              statusRequest.set(batch.requests().get(0));
               return new AttributeResolutionBatchResponse(
                   batch.requests().stream()
                       .map(
                           request ->
                               new AttributeResolutionResponse(
                                   request,
-                                  List.of(new ResolvedAttribute(CLASSIFICATION, "internal"))))
+                                  List.of(new ResolvedAttribute(STATUS, "active")),
+                                  ConsistencyContext.of(token)))
+                      .toList());
+            });
+    TestAttributeResolver classificationResolver =
+        new TestAttributeResolver(
+            "classification",
+            Set.of(CLASSIFICATION),
+            batch -> {
+              classificationRequest.set(batch.requests().get(0));
+              return new AttributeResolutionBatchResponse(
+                  batch.requests().stream()
+                      .map(
+                          request ->
+                              new AttributeResolutionResponse(
+                                  request,
+                                  List.of(new ResolvedAttribute(CLASSIFICATION, "internal")),
+                                  ConsistencyContext.of(token)))
                       .toList());
             });
     ResolverRegistryAttributeLookup lookup =
@@ -77,8 +81,16 @@ class ResolverRegistryAttributeLookupTest {
         .containsEntry(STATUS, "active")
         .containsEntry(CLASSIFICATION, "internal");
     assertThat(result.consistency()).contains(token);
-    assertThat(secondRequest.get().context().consistency().token()).contains(token);
-    assertThat(secondRequest.get().context().deadline()).contains(new ResolverDeadline(deadline));
+    assertThat(
+            List.of(
+                statusRequest.get().context().consistency().token(),
+                classificationRequest.get().context().consistency().token()))
+        .containsExactlyInAnyOrder(Optional.empty(), Optional.of(token));
+    assertThat(
+            List.of(
+                statusRequest.get().context().deadline(),
+                classificationRequest.get().context().deadline()))
+        .containsOnly(Optional.of(new ResolverDeadline(deadline)));
   }
 
   @Test
