@@ -8,7 +8,6 @@ import com.luokuiai.forga.spring.web.EndpointPermissionRegistrations;
 import com.luokuiai.forga.spring.web.EndpointPermissionRequirement;
 import com.luokuiai.forga.spring.web.EndpointPermissionResolver;
 import jakarta.servlet.http.HttpServletRequest;
-import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import org.springframework.beans.factory.ObjectProvider;
@@ -33,7 +32,6 @@ import org.springframework.web.servlet.mvc.method.annotation.RequestMappingHandl
 @ConditionalOnClass(WebMvcConfigurer.class)
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 @ConditionalOnForgaEnabled
-@ConditionalOnBean(EndpointPermissionContributor.class)
 public class ForgaSpringWebAutoConfiguration {
 
   /**
@@ -45,8 +43,9 @@ public class ForgaSpringWebAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public EndpointPermissionRegistrations forgaEndpointPermissionRegistrations(
-      List<EndpointPermissionContributor> contributors) {
-    return EndpointPermissionRegistrations.fromContributors(contributors);
+      ObjectProvider<EndpointPermissionContributor> contributors) {
+    return EndpointPermissionRegistrations.fromContributors(
+        contributors.orderedStream().toList());
   }
 
   /**
@@ -80,13 +79,12 @@ public class ForgaSpringWebAutoConfiguration {
   }
 
   @Bean
+  @ConditionalOnBean(EndpointPermissionContributor.class)
   SmartInitializingSingleton forgaEndpointPermissionEnforcementValidation(
-      ObjectProvider<EndpointPermissionAuthorizer> authorizer,
-      ObjectProvider<EndpointPermissionInterceptor> interceptor) {
+      ObjectProvider<EndpointPermissionAuthorizer> authorizer) {
     return () -> {
-      if (authorizer.getIfAvailable() == null && interceptor.getIfAvailable() == null) {
-        throw new IllegalStateException(
-            "endpoint permission authorizer or host interceptor is required");
+      if (authorizer.getIfAvailable() == null) {
+        throw new IllegalStateException("endpoint permission authorizer is required");
       }
     };
   }
@@ -94,7 +92,6 @@ public class ForgaSpringWebAutoConfiguration {
   /** Auto-configures endpoint enforcement when the host supplies an authorizer. */
   @Configuration(proxyBeanMethods = false)
   @ConditionalOnBean(EndpointPermissionAuthorizer.class)
-  @ConditionalOnMissingBean(EndpointPermissionInterceptor.class)
   static class EndpointEnforcementConfiguration {
 
     @Bean
@@ -105,7 +102,8 @@ public class ForgaSpringWebAutoConfiguration {
 
     @Bean("forgaEndpointPermissionWebMvcConfigurer")
     WebMvcConfigurer forgaEndpointPermissionWebMvcConfigurer(
-        EndpointPermissionInterceptor interceptor) {
+        @Qualifier("forgaEndpointPermissionInterceptor")
+            EndpointPermissionInterceptor interceptor) {
       return new WebMvcConfigurer() {
         @Override
         public void addInterceptors(InterceptorRegistry registry) {

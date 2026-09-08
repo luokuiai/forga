@@ -503,11 +503,11 @@ overloads. Startup fails when the method is missing, is not a Spring MVC handler
 annotation metadata. Required permission definitions enter the ordinary `PermissionCatalog`
 automatically; permit-all registrations add no catalog entry.
 
-When Forga is enabled and endpoint contributors plus an `EndpointPermissionAuthorizer` are present,
-the Spring Boot Starter compiles the registrations and installs the MVC interceptor automatically.
-Existing annotation-only integrations may continue registering the interceptor directly. Hosts
-with request-dependent metadata can still implement `EndpointPermissionResolver`; its result is
-composed with annotations and registrations, and conflicting results fail closed.
+When Forga is enabled and an `EndpointPermissionAuthorizer` is present, the Spring Boot Starter
+installs the MVC interceptor automatically. Endpoint contributors are optional and are needed only
+for handlers whose permission metadata cannot be declared with annotations. Hosts with
+request-dependent metadata can still implement `EndpointPermissionResolver`; its result is composed
+with annotations and registrations, and conflicting or unresolved results fail closed.
 
 The host authorizer maps the resolved permission and request context into Forga checks:
 
