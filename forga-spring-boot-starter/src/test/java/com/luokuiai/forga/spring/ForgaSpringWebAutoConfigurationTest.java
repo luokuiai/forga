@@ -2,17 +2,18 @@ package com.luokuiai.forga.spring;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.luokuiai.forga.core.catalog.PermissionCatalog;
 import com.luokuiai.forga.core.catalog.PermissionDefinition;
 import com.luokuiai.forga.core.model.PermissionRef;
 import com.luokuiai.forga.spring.web.EndpointAuthorizationDecision;
+import com.luokuiai.forga.spring.web.EndpointAuthorizationException;
 import com.luokuiai.forga.spring.web.EndpointPermissionAuthorizer;
 import com.luokuiai.forga.spring.web.EndpointPermissionContributor;
 import com.luokuiai.forga.spring.web.EndpointPermissionInterceptor;
 import com.luokuiai.forga.spring.web.EndpointPermissionRegistrations;
-import com.luokuiai.forga.spring.web.EndpointPermissionRequirement;
-import java.util.Optional;
+import com.luokuiai.forga.spring.web.RequiresPermission;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -52,6 +53,42 @@ class ForgaSpringWebAutoConfigurationTest {
   }
 
   @Test
+  void automaticallyEnforcesAnnotationsWithoutEndpointContributors() {
+    runner(AnnotationOnlyWebConfiguration.class)
+        .run(
+            context -> {
+              assertThat(context).hasSingleBean(EndpointPermissionRegistrations.class);
+              assertThat(context).hasSingleBean(EndpointPermissionInterceptor.class);
+              assertThat(context).hasBean("forgaEndpointPermissionWebMvcConfigurer");
+              assertThat(context.getBean(PermissionCatalog.class).definitions()).isEmpty();
+
+              MockMvc mvc = MockMvcBuilders.webAppContextSetup(context).build();
+              assertThatCode(
+                      () ->
+                          mvc.perform(MockMvcRequestBuilders.get("/annotated"))
+                              .andExpect(MockMvcResultMatchers.status().isOk()))
+                  .doesNotThrowAnyException();
+              assertThat(context.getBean(AtomicInteger.class)).hasValue(1);
+
+              assertThatThrownBy(() -> mvc.perform(MockMvcRequestBuilders.get("/unresolved")))
+                  .hasRootCauseInstanceOf(EndpointAuthorizationException.class)
+                  .hasRootCauseMessage(
+                      "endpoint authorization denied: ENDPOINT_PERMISSION_UNRESOLVED");
+            });
+  }
+
+  @Test
+  void startsWithoutWebPermissionBeansOrContributors() {
+    runner(NoWebPermissionConfiguration.class)
+        .run(
+            context -> {
+              assertThat(context).hasNotFailed();
+              assertThat(context).hasSingleBean(EndpointPermissionRegistrations.class);
+              assertThat(context).doesNotHaveBean(EndpointPermissionInterceptor.class);
+            });
+  }
+
+  @Test
   void legacyPropertyDoesNotAssembleWebIntegration() {
     runner(DisabledWebConfiguration.class)
         .withPropertyValues("forga.enabled=true")
@@ -59,18 +96,6 @@ class ForgaSpringWebAutoConfigurationTest {
             context -> {
               assertThat(context).doesNotHaveBean(EndpointPermissionRegistrations.class);
               assertThat(context).doesNotHaveBean(EndpointPermissionInterceptor.class);
-            });
-  }
-
-  @Test
-  void backsOffAutoEnforcementForHostInterceptor() {
-    runner(CustomInterceptorWebConfiguration.class)
-        .run(
-            context -> {
-              assertThat(context).hasSingleBean(EndpointPermissionInterceptor.class);
-              assertThat(context).doesNotHaveBean("forgaEndpointPermissionWebMvcConfigurer");
-              assertThat(context.getBean(PermissionCatalog.class).definitions())
-                  .containsExactly(ValidWebConfiguration.VIEW);
             });
   }
 
@@ -90,7 +115,7 @@ class ForgaSpringWebAutoConfigurationTest {
         .run(
             context ->
                 assertThat(context.getStartupFailure())
-                    .hasMessageContaining("authorizer or host interceptor is required"));
+                    .hasMessageContaining("endpoint permission authorizer is required"));
   }
 
   private static WebApplicationContextRunner runner(Class<?> configuration) {
@@ -139,25 +164,35 @@ class ForgaSpringWebAutoConfigurationTest {
   @Configuration(proxyBeanMethods = false)
   @EnableWebMvc
   @EnableForga
-  static class CustomInterceptorWebConfiguration {
+  static class AnnotationOnlyWebConfiguration {
 
     @Bean
-    VendorOrderController vendorOrderController() {
-      return new VendorOrderController();
+    AnnotationOnlyController annotationOnlyController() {
+      return new AnnotationOnlyController();
     }
 
     @Bean
-    EndpointPermissionContributor endpointPermissionContributor() {
-      return registry ->
-          registry.require(
-              VendorOrderController.class, "getOrder", ValidWebConfiguration.VIEW, String.class);
+    AtomicInteger authorizationInvocations() {
+      return new AtomicInteger();
     }
 
     @Bean
-    EndpointPermissionInterceptor endpointPermissionInterceptor() {
-      return new EndpointPermissionInterceptor(
-          (handler, request) -> Optional.of(EndpointPermissionRequirement.permitAll()),
-          invocation -> EndpointAuthorizationDecision.allowed(invocation.permission()));
+    EndpointPermissionAuthorizer endpointPermissionAuthorizer(AtomicInteger invocations) {
+      return invocation -> {
+        invocations.incrementAndGet();
+        return EndpointAuthorizationDecision.allowed(invocation.permission());
+      };
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  @EnableWebMvc
+  @EnableForga
+  static class NoWebPermissionConfiguration {
+
+    @Bean
+    AnnotationOnlyController annotationOnlyController() {
+      return new AnnotationOnlyController();
     }
   }
 
@@ -211,6 +246,21 @@ class ForgaSpringWebAutoConfigurationTest {
     @GetMapping("/vendor/orders/{orderId}")
     String getOrder(@PathVariable("orderId") String orderId) {
       return orderId;
+    }
+  }
+
+  @RestController
+  static class AnnotationOnlyController {
+
+    @RequiresPermission("meeting:view")
+    @GetMapping("/annotated")
+    String annotated() {
+      return "annotated";
+    }
+
+    @GetMapping("/unresolved")
+    String unresolved() {
+      return "unresolved";
     }
   }
 }
