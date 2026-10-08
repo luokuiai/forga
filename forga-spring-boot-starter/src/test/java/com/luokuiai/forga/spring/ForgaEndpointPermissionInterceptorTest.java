@@ -1,9 +1,16 @@
-package com.luokuiai.forga.spring.web;
+package com.luokuiai.forga.spring;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.luokuiai.forga.core.model.PermissionRef;
+import com.luokuiai.forga.spring.web.DefaultEndpointPermissionResolver;
+import com.luokuiai.forga.spring.web.EndpointAuthorizationDecision;
+import com.luokuiai.forga.spring.web.EndpointAuthorizationException;
+import com.luokuiai.forga.spring.web.EndpointInvocation;
+import com.luokuiai.forga.spring.web.EndpointPermissionAuthorizer;
+import com.luokuiai.forga.spring.web.EndpointPermissionResolver;
+import com.luokuiai.forga.spring.web.RequiresPermission;
 import jakarta.annotation.security.PermitAll;
 import java.util.ArrayList;
 import java.util.List;
@@ -13,12 +20,12 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.web.method.HandlerMethod;
 
-class EndpointPermissionInterceptorTest {
+class ForgaEndpointPermissionInterceptorTest {
 
   @Test
   void authorizesResolvedPermissionBeforeHandler() throws Exception {
     List<EndpointInvocation> invocations = new ArrayList<>();
-    EndpointPermissionInterceptor interceptor =
+    ForgaEndpointPermissionInterceptor interceptor =
         interceptor(
             new DefaultEndpointPermissionResolver(),
             invocation -> {
@@ -37,7 +44,7 @@ class EndpointPermissionInterceptorTest {
   @Test
   void skipsAuthorizerForExplicitPermitAll() throws Exception {
     List<EndpointInvocation> invocations = new ArrayList<>();
-    EndpointPermissionInterceptor interceptor =
+    ForgaEndpointPermissionInterceptor interceptor =
         interceptor(
             new DefaultEndpointPermissionResolver(),
             invocation -> {
@@ -51,7 +58,7 @@ class EndpointPermissionInterceptorTest {
 
   @Test
   void failsClosedForUnresolvedEndpoint() throws Exception {
-    EndpointPermissionInterceptor interceptor =
+    ForgaEndpointPermissionInterceptor interceptor =
         interceptor(
             (handler, request) -> Optional.empty(),
             invocation -> EndpointAuthorizationDecision.allowed(invocation.permission()));
@@ -66,13 +73,13 @@ class EndpointPermissionInterceptorTest {
   @Test
   void failsClosedForDeniedAndNullAuthorizerDecisions() throws Exception {
     EndpointPermissionResolver resolver = new DefaultEndpointPermissionResolver();
-    EndpointPermissionInterceptor denied =
+    ForgaEndpointPermissionInterceptor denied =
         interceptor(
             resolver,
             invocation ->
                 EndpointAuthorizationDecision.denied(
                     invocation.permission(), "PERMISSION_NOT_GRANTED"));
-    EndpointPermissionInterceptor nullDecision = interceptor(resolver, invocation -> null);
+    ForgaEndpointPermissionInterceptor nullDecision = interceptor(resolver, invocation -> null);
 
     assertThatThrownBy(() -> denied.preHandle(request(), response(), handler("meeting")))
         .isInstanceOf(EndpointAuthorizationException.class)
@@ -86,7 +93,7 @@ class EndpointPermissionInterceptorTest {
 
   @Test
   void ignoresNonHandlerObjects() {
-    EndpointPermissionInterceptor interceptor =
+    ForgaEndpointPermissionInterceptor interceptor =
         interceptor(
             (handler, request) -> Optional.empty(),
             invocation -> EndpointAuthorizationDecision.allowed(invocation.permission()));
@@ -94,9 +101,9 @@ class EndpointPermissionInterceptorTest {
     assertThat(interceptor.preHandle(request(), response(), new Object())).isTrue();
   }
 
-  private static EndpointPermissionInterceptor interceptor(
+  private static ForgaEndpointPermissionInterceptor interceptor(
       EndpointPermissionResolver resolver, EndpointPermissionAuthorizer authorizer) {
-    return new EndpointPermissionInterceptor(resolver, authorizer);
+    return new ForgaEndpointPermissionInterceptor(resolver, authorizer);
   }
 
   private static HandlerMethod handler(String method) throws Exception {
