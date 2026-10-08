@@ -5,4 +5,5 @@ dependencies {
   testImplementation "org.springframework.boot:spring-boot-autoconfigure:${springBootVersion}"
   testImplementation "org.springframework.boot:spring-boot-test:${springBootVersion}"
   testImplementation "org.springframework.security:spring-security-core:${springSecurityVersion}"
+  testImplementation project(':forga-spring-boot-starter')
 }

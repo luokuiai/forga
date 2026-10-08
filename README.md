@@ -503,25 +503,38 @@ overloads. Startup fails when the method is missing, is not a Spring MVC handler
 annotation metadata. Required permission definitions enter the ordinary `PermissionCatalog`
 automatically; permit-all registrations add no catalog entry.
 
-When Forga is enabled and an `EndpointPermissionAuthorizer` is present, the Spring Boot Starter
-installs the MVC interceptor automatically. Endpoint contributors are optional and are needed only
+With `@EnableForga`, the Spring Boot Starter installs MVC enforcement automatically and requires an
+`EndpointPermissionAuthorizer` at startup. Endpoint contributors are optional and are needed only
 for handlers whose permission metadata cannot be declared with annotations. Hosts with
 request-dependent metadata can still implement `EndpointPermissionResolver`; its result is composed
 with annotations and registrations, and conflicting or unresolved results fail closed.
 
-The host authorizer maps the resolved permission and request context into Forga checks:
+The host authorizer maps the resolved permission and request context into Forga checks. It obtains
+the current user's permissions from host-owned business logic; Forga does not query those permissions
+automatically:
 
 ```java
-EndpointPermissionAuthorizer authorizer =
-    invocation -> hostAuthorization.authorize(invocation);
-
-EndpointPermissionInterceptor interceptor =
-    new EndpointPermissionInterceptor(
-        new DefaultEndpointPermissionResolver(),
-        authorizer);
+@Bean
+EndpointPermissionAuthorizer endpointPermissionAuthorizer() {
+  return invocation -> hostAuthorization.authorize(invocation);
+}
 ```
 
-For manual annotation-only integration, register the interceptor once in Spring MVC configuration.
+The default scope covers all MVC handlers. To restrict enforcement to API paths, supply one scope
+bean in application code:
+
+```java
+@Bean
+ForgaWebScope forgaWebScope() {
+  return ForgaWebScope.include(API_PREFIX + "**");
+}
+```
+
+Excluded paths can be supplied with `new ForgaWebScope(includePaths, excludePaths)`. An annotated
+or Contributor-registered handler outside the scope fails startup. Paths inside the scope without
+permission metadata fail closed. Omitting `@EnableForga` disables Forga integration. Do not
+construct or register an interceptor manually.
+
 Controllers, services, and mappers never call Forga authorization methods explicitly. Collection
 authorization remains in MyBatis query constraints so filtering, sorting, and pagination happen in
 SQL.
@@ -590,9 +603,11 @@ public class Application {
 
 An enabled Spring application can start before its authorization model is ready. Without a
 `CompiledPolicy` Bean, the Starter logs a warning and does not create an
-`AuthorizationEvaluator`; unrelated application endpoints continue to use their existing behavior.
-This state is deliberately not represented by an allow-all evaluator. Any component that explicitly
-requires an `AuthorizationEvaluator` still fails Spring dependency validation.
+`AuthorizationEvaluator`. This state is deliberately not represented by an allow-all evaluator.
+Any component that explicitly requires an `AuthorizationEvaluator` still fails Spring dependency
+validation. In a servlet MVC application, `@EnableForga` also requires an
+`EndpointPermissionAuthorizer`; handlers inside the configured Web scope must declare a permission
+or `@PermitAll`.
 
 When the host provides one `CompiledPolicy` Bean and its specialized `Resolver` Beans, the Starter
 automatically assembles:
@@ -629,7 +644,8 @@ restart with a newly compiled policy.
 - distinct tenant-scoped `user` and `membership` subjects for concurrent appointments
 - a dynamic `appointed` relationship plus current-department validation for `DEPARTMENT` scope
 - request providers reading subject type, subject id, effective tenant, and current department headers
-- a controller mapping `/documents/{id}` to an authorization `ObjectRef`
+- `@RequiresPermission` on `/documents/{id}` and a host authorizer mapping the path variable to an
+  authorization `ObjectRef`
 
 Run it from the repository root:
 

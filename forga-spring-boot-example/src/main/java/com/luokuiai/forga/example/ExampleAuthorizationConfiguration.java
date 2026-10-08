@@ -2,7 +2,9 @@ package com.luokuiai.forga.example;
 
 import com.luokuiai.forga.core.context.AuthenticatedSubjectProvider;
 import com.luokuiai.forga.core.context.AuthorizationAttributesProvider;
+import com.luokuiai.forga.core.eval.AuthorizationEvaluator;
 import com.luokuiai.forga.core.eval.BatchResolution;
+import com.luokuiai.forga.core.eval.CheckRequest;
 import com.luokuiai.forga.core.eval.PermissionGrantLookup;
 import com.luokuiai.forga.core.model.AttributeRef;
 import com.luokuiai.forga.core.model.ObjectRef;
@@ -29,6 +31,8 @@ import com.luokuiai.forga.resolver.ForwardRelationshipRequest;
 import com.luokuiai.forga.resolver.ForwardRelationshipResponse;
 import com.luokuiai.forga.resolver.ForwardRelationshipResolver;
 import com.luokuiai.forga.resolver.RelationshipSubject;
+import com.luokuiai.forga.spring.web.EndpointAuthorizationDecision;
+import com.luokuiai.forga.spring.web.EndpointPermissionAuthorizer;
 import jakarta.servlet.http.HttpServletRequest;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -38,6 +42,7 @@ import java.util.Set;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.web.servlet.HandlerMapping;
 
 @Configuration(proxyBeanMethods = false)
 class ExampleAuthorizationConfiguration {
@@ -184,6 +189,40 @@ class ExampleAuthorizationConfiguration {
       putHeader(attributes, EFFECTIVE_TENANT_ID, request, "X-Effective-Tenant-Id");
       putHeader(attributes, CURRENT_DEPARTMENT_ID, request, "X-Department-Id");
       return Map.copyOf(attributes);
+    };
+  }
+
+  @Bean
+  EndpointPermissionAuthorizer endpointPermissionAuthorizer(
+      AuthorizationEvaluator evaluator,
+      AuthenticatedSubjectProvider subjects,
+      AuthorizationAttributesProvider attributes) {
+    return invocation -> {
+      Optional<SubjectRef> subject = subjects.currentSubject();
+      if (subject.isEmpty()) {
+        return EndpointAuthorizationDecision.denied(
+            invocation.permission(), "AUTHENTICATION_REQUIRED");
+      }
+      Object pathVariables =
+          invocation.request().getAttribute(HandlerMapping.URI_TEMPLATE_VARIABLES_ATTRIBUTE);
+      Object documentId =
+          pathVariables instanceof Map<?, ?> variables ? variables.get("documentId") : null;
+      if (!(documentId instanceof String id)) {
+        return EndpointAuthorizationDecision.denied(
+            invocation.permission(), "DOCUMENT_ID_UNRESOLVED");
+      }
+      boolean allowed =
+          evaluator
+              .check(
+                  new CheckRequest(
+                      new ObjectRef("document", id),
+                      invocation.permission(),
+                      subject.orElseThrow(),
+                      attributes.attributes()))
+              .allowed();
+      return allowed
+          ? EndpointAuthorizationDecision.allowed(invocation.permission())
+          : EndpointAuthorizationDecision.denied(invocation.permission(), "PERMISSION_NOT_GRANTED");
     };
   }
 

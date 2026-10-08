@@ -3,6 +3,7 @@ dependencies {
   compileOnly "cn.dev33:sa-token-core:${saTokenVersion}"
   compileOnly "org.springframework.boot:spring-boot-autoconfigure:${springBootVersion}"
   testImplementation "cn.dev33:sa-token-core:${saTokenVersion}"
+  testImplementation project(':forga-spring-boot-starter')
   testImplementation "org.springframework.boot:spring-boot-autoconfigure:${springBootVersion}"
   testImplementation "org.springframework.boot:spring-boot-test:${springBootVersion}"
 }

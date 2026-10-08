@@ -11,7 +11,6 @@ import com.luokuiai.forga.spring.web.EndpointAuthorizationDecision;
 import com.luokuiai.forga.spring.web.EndpointAuthorizationException;
 import com.luokuiai.forga.spring.web.EndpointPermissionAuthorizer;
 import com.luokuiai.forga.spring.web.EndpointPermissionContributor;
-import com.luokuiai.forga.spring.web.EndpointPermissionInterceptor;
 import com.luokuiai.forga.spring.web.EndpointPermissionRegistrations;
 import com.luokuiai.forga.spring.web.RequiresPermission;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -37,7 +36,7 @@ class ForgaSpringWebAutoConfigurationTest {
         .run(
             context -> {
               assertThat(context).hasSingleBean(EndpointPermissionRegistrations.class);
-              assertThat(context).hasSingleBean(EndpointPermissionInterceptor.class);
+              assertThat(context).hasSingleBean(ForgaEndpointPermissionInterceptor.class);
               assertThat(context).hasBean("forgaEndpointPermissionWebMvcConfigurer");
               assertThat(context.getBean(PermissionCatalog.class).definitions())
                   .containsExactly(ValidWebConfiguration.VIEW);
@@ -58,7 +57,7 @@ class ForgaSpringWebAutoConfigurationTest {
         .run(
             context -> {
               assertThat(context).hasSingleBean(EndpointPermissionRegistrations.class);
-              assertThat(context).hasSingleBean(EndpointPermissionInterceptor.class);
+              assertThat(context).hasSingleBean(ForgaEndpointPermissionInterceptor.class);
               assertThat(context).hasBean("forgaEndpointPermissionWebMvcConfigurer");
               assertThat(context.getBean(PermissionCatalog.class).definitions()).isEmpty();
 
@@ -78,14 +77,99 @@ class ForgaSpringWebAutoConfigurationTest {
   }
 
   @Test
-  void startsWithoutWebPermissionBeansOrContributors() {
+  void failsWithoutAuthorizerEvenWithoutContributors() {
     runner(NoWebPermissionConfiguration.class)
         .run(
             context -> {
-              assertThat(context).hasNotFailed();
-              assertThat(context).hasSingleBean(EndpointPermissionRegistrations.class);
-              assertThat(context).doesNotHaveBean(EndpointPermissionInterceptor.class);
+              assertThat(context.getStartupFailure())
+                  .hasMessageContaining("endpoint permission authorizer is required");
             });
+  }
+
+  @Test
+  void codeScopeEnforcesOnlyIncludedPaths() {
+    runner(ScopedWebConfiguration.class)
+        .run(
+            context -> {
+              assertThat(context).hasNotFailed();
+              MockMvc mvc = MockMvcBuilders.webAppContextSetup(context).build();
+              assertThatCode(
+                      () ->
+                          mvc.perform(MockMvcRequestBuilders.get("/annotated"))
+                              .andExpect(MockMvcResultMatchers.status().isOk()))
+                  .doesNotThrowAnyException();
+              assertThatCode(
+                      () ->
+                          mvc.perform(MockMvcRequestBuilders.get("/unresolved"))
+                              .andExpect(MockMvcResultMatchers.status().isOk()))
+                  .doesNotThrowAnyException();
+              assertThat(context.getBean(AtomicInteger.class)).hasValue(1);
+            });
+  }
+
+  @Test
+  void scopeTemplateVariableNameDoesNotNeedToMatchHandlerVariableName() {
+    runner(TemplateScopedWebConfiguration.class)
+        .run(
+            context -> {
+              assertThat(context).hasNotFailed();
+              MockMvc mvc = MockMvcBuilders.webAppContextSetup(context).build();
+              assertThatCode(
+                      () ->
+                          mvc.perform(MockMvcRequestBuilders.get("/api/acme/orders"))
+                              .andExpect(MockMvcResultMatchers.status().isOk()))
+                  .doesNotThrowAnyException();
+              assertThat(context.getBean(AtomicInteger.class)).hasValue(1);
+            });
+  }
+
+  @Test
+  void declaredEndpointOutsideScopeFailsStartup() {
+    runner(OutOfScopeWebConfiguration.class)
+        .run(
+            context ->
+                assertThat(context.getStartupFailure())
+                    .hasMessageContaining("declared endpoint is outside Forga Web scope")
+                    .hasMessageContaining("/annotated"));
+  }
+
+  @Test
+  void registeredEndpointOutsideScopeFailsStartup() {
+    runner(OutOfScopeContributorConfiguration.class)
+        .run(
+            context ->
+                assertThat(context.getStartupFailure())
+                    .hasMessageContaining("declared endpoint is outside Forga Web scope")
+                    .hasMessageContaining("/vendor/orders/{orderId}"));
+  }
+
+  @Test
+  void excludedAnnotatedEndpointFailsStartup() {
+    runner(ExcludedWebConfiguration.class)
+        .run(
+            context ->
+                assertThat(context.getStartupFailure())
+                    .hasMessageContaining("declared endpoint is outside Forga Web scope")
+                    .hasMessageContaining("/annotated"));
+  }
+
+  @Test
+  void excludedConcretePathCannotBypassRegisteredTemplateHandler() {
+    runner(ExcludedTemplateWebConfiguration.class)
+        .run(
+            context ->
+                assertThat(context.getStartupFailure())
+                    .hasMessageContaining("declared endpoint is outside Forga Web scope")
+                    .hasMessageContaining("/vendor/orders/{orderId}"));
+  }
+
+  @Test
+  void multipleScopesFailStartup() {
+    runner(MultipleScopesWebConfiguration.class)
+        .run(
+            context ->
+                assertThat(context.getStartupFailure())
+                    .hasMessageContaining("exactly one Forga Web scope is required"));
   }
 
   @Test
@@ -95,7 +179,7 @@ class ForgaSpringWebAutoConfigurationTest {
         .run(
             context -> {
               assertThat(context).doesNotHaveBean(EndpointPermissionRegistrations.class);
-              assertThat(context).doesNotHaveBean(EndpointPermissionInterceptor.class);
+              assertThat(context).doesNotHaveBean(ForgaEndpointPermissionInterceptor.class);
             });
   }
 
@@ -199,6 +283,107 @@ class ForgaSpringWebAutoConfigurationTest {
   @Configuration(proxyBeanMethods = false)
   @EnableWebMvc
   @EnableForga
+  static class ScopedWebConfiguration extends AnnotationOnlyWebConfiguration {
+
+    @Bean
+    ForgaWebScope forgaWebScope() {
+      return ForgaWebScope.include("/annotated");
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  @EnableWebMvc
+  @EnableForga
+  static class TemplateScopedWebConfiguration {
+
+    @Bean
+    ForgaWebScope forgaWebScope() {
+      return ForgaWebScope.include("/api/{tenant}/**");
+    }
+
+    @Bean
+    TemplateScopedController templateScopedController() {
+      return new TemplateScopedController();
+    }
+
+    @Bean
+    AtomicInteger authorizationInvocations() {
+      return new AtomicInteger();
+    }
+
+    @Bean
+    EndpointPermissionAuthorizer endpointPermissionAuthorizer(AtomicInteger invocations) {
+      return invocation -> {
+        invocations.incrementAndGet();
+        return EndpointAuthorizationDecision.allowed(invocation.permission());
+      };
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  @EnableWebMvc
+  @EnableForga
+  static class OutOfScopeWebConfiguration extends AnnotationOnlyWebConfiguration {
+
+    @Bean
+    ForgaWebScope forgaWebScope() {
+      return ForgaWebScope.include("/unresolved");
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  @EnableWebMvc
+  @EnableForga
+  static class MultipleScopesWebConfiguration extends AnnotationOnlyWebConfiguration {
+
+    @Bean
+    ForgaWebScope firstScope() {
+      return ForgaWebScope.include("/annotated");
+    }
+
+    @Bean
+    ForgaWebScope secondScope() {
+      return ForgaWebScope.include("/unresolved");
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  @EnableWebMvc
+  @EnableForga
+  static class ExcludedWebConfiguration extends AnnotationOnlyWebConfiguration {
+
+    @Bean
+    ForgaWebScope forgaWebScope() {
+      return new ForgaWebScope(java.util.List.of("/**"), java.util.List.of("/annotated"));
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  @EnableWebMvc
+  @EnableForga
+  static class OutOfScopeContributorConfiguration extends ValidWebConfiguration {
+
+    @Bean
+    ForgaWebScope forgaWebScope() {
+      return ForgaWebScope.include("/other/**");
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  @EnableWebMvc
+  @EnableForga
+  static class ExcludedTemplateWebConfiguration extends ValidWebConfiguration {
+
+    @Bean
+    ForgaWebScope forgaWebScope() {
+      return new ForgaWebScope(
+          java.util.List.of("/**"), java.util.List.of("/vendor/orders/42"));
+    }
+  }
+
+  @Configuration(proxyBeanMethods = false)
+  @EnableWebMvc
+  @EnableForga
   static class InvalidWebConfiguration {
 
     @Bean
@@ -246,6 +431,16 @@ class ForgaSpringWebAutoConfigurationTest {
     @GetMapping("/vendor/orders/{orderId}")
     String getOrder(@PathVariable("orderId") String orderId) {
       return orderId;
+    }
+  }
+
+  @RestController
+  static class TemplateScopedController {
+
+    @RequiresPermission("vendor:order:view")
+    @GetMapping("/api/{account}/orders")
+    String orders(@PathVariable("account") String account) {
+      return account;
     }
   }
 
